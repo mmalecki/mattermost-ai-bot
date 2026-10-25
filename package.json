@@ -1,0 +1,33 @@
+{
+  "name": "mattermost-pi",
+  "version": "0.1.0",
+  "description": "Mattermost bot for home automation and web research, on the pi agent harness",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "author": "Maciej Małecki <me@mmalecki.com>",
+  "engines": {
+    "node": ">=24.1"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "^1.4.0",
+    "@earendil-works/pi-coding-agent": "^1.4.0",
+    "@mattermost/client": "^11.9.0",
+    "@mattermost/types": "^11.9.0",
+    "@mmalecki/feather-pi-web": "^0.1.0"
+  },
+  "overrides": {
+    "@mattermost/client": {
+      "typescript": "$typescript"
+    }
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "@types/node": "^26.6.4"
+  }
+}
