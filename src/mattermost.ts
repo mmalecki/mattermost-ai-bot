@@ -12,6 +12,7 @@ export class Mattermost implements Chat {
   readonly url: string;
   readonly token: string;
   botUserId = '';
+  botUsername = '';
 
   constructor(url: string, token: string) {
     this.url = url;
@@ -24,6 +25,7 @@ export class Mattermost implements Chat {
   async connect(onPost: (post: IncomingPost) => void): Promise<void> {
     const me = await this.#client.getMe();
     this.botUserId = me.id;
+    this.botUsername = me.username;
     console.log(`Logged in to ${this.url} as @${me.username}`);
 
     this.#ws.addMessageListener((msg) => {

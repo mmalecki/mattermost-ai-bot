@@ -25,14 +25,17 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --test \"test/**/*.test.ts\""
+    "test": "node --test \"test/**/*.test.ts\"",
+    "eval": "node --env-file-if-exists=.env eval/tool-use.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^1.4.0",
     "@earendil-works/pi-coding-agent": "^1.4.0",
     "@mattermost/client": "^11.9.0",
     "@mattermost/types": "^11.9.0",
-    "@mmalecki/feather-pi-web": "^0.1.0"
+    "@mmalecki/feather-pi-web": "^0.1.0",
+    "jiti": "^2.7.0",
+    "pi-ate-scheduler": "github:catlain/pi-scheduler#6541484891e7e23eece658b25934faef1358f369"
   },
   "overrides": {
     "@mattermost/client": {

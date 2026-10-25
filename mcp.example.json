@@ -1,0 +1,11 @@
+{
+  "allowedUsers": ["alice", "bob"],
+  "mcpServers": {
+    "homeassistant": {
+      "url": "http://homeassistant.local:8123/api/mcp",
+      "headers": { "Authorization": "Bearer ${HASS_TOKEN}" },
+      "exposure": "direct",
+      "description": "Home Assistant: state and control of the devices in the home"
+    }
+  }
+}

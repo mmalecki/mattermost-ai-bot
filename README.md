@@ -3,24 +3,81 @@ An AI bot for Mattermost: an LLM agent that takes part in your threads and gets 
 
 * Mention the bot in a channel, or DM it, to start a thread. Every later post in that thread reaches the agent, along
   with any posts it missed. Each thread is one pi session, kept in `data/sessions/<root post id>.jsonl`.
-* Tools come from pi extensions and MCP servers. Web research (`websearch` and `webfetch`, from
-  [feather-pi-web](https://github.com/mmalecki/feather-pi-web)) is built in. No file or shell access.
+* Web research (`websearch` and `webfetch`, from [feather-pi-web](https://github.com/mmalecki/feather-pi-web)) is built
+  in. Further tools come from the MCP servers in `mcp.json`. No file or shell access.
 * The model runs in pi's agent loop until it stops calling tools; its final answer is posted to the thread.
 
 ## Configuration
 Set in `.env`:
 
 * `MATTERMOST_URL`, `MATTERMOST_TOKEN` - Mattermost server and bot token
-* `OPENAI_BASE_URL`, `OPENAI_API_KEY` - an OpenAI-compatible endpoint and its key. Without `OPENAI_BASE_URL`, Anthropic's
-  endpoint is used with `ANTHROPIC_API_KEY`
-* `OPENAI_MODEL` - default `claude-haiku-5-5`
-* `OPENAI_MODEL_CONTEXT_WINDOW`, `OPENAI_MODEL_MAX_TOKENS` - defaults 200000 and 16384
+* `MODEL` - the model, as `provider/model[:thinking]` like pi's `--model`, for example
+  `mistral/mistral-small-2603` or `anthropic/claude-haiku-5-5:low`. pi's catalog supplies the API, context window and
+  quirks of its [providers](https://pi.dev/docs/latest/providers); thinking is off unless the suffix sets a level
+* The provider's key, under pi's name for it: `MISTRAL_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, ...
+* `MAX_OUTPUT_TOKENS` - default 8192, or the model's own limit if lower. It includes reasoning, and keeps a model
+  stuck repeating itself from running for long
 * `PARALLEL_API_KEY` - enables `websearch`
-* `HASS_SERVER`, `HASS_TOKEN` - Home Assistant and a long-lived access token, named as in `hass-cli`. Needs the "Model
-  Context Protocol Server" integration; the agent sees the entities exposed to Assist
-* `HASS_ALLOWED_USERS` - comma-separated Mattermost usernames who may use Home Assistant. A run gets Home Assistant
-  only when every post it answers comes from one of them
+* `MCP_CONFIG` - path to the tools configuration, below. Default `./mcp.json`, which may be missing
 * `DATA_DIR` - default `./data`
+* `TZ` - time zone the posts' times are given to the model in, with their UTC offset. Default: the system's
+* `SCHEDULER` - `true` lets the agent schedule jobs in a thread, once or repeatedly, with
+  [pi-ate-scheduler](https://github.com/catlain/pi-scheduler). Default `false`. See below
+
+Endpoints pi doesn't know, such as a llama.cpp server, go in `models.json` next to `mcp.json`, in
+[pi's format](https://pi.dev/docs/latest/models-configuration):
+
+```json
+{
+  "providers": {
+    "local": {
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "api": "openai-completions",
+      "apiKey": "none",
+      "models": [{ "id": "qwen3.6-35b", "contextWindow": 131072 }]
+    }
+  }
+}
+```
+
+with `MODEL=local/qwen3.6-35b`.
+
+## Instructions
+`APPEND_SYSTEM.md`, next to `mcp.json`, is added to the system prompt, as in pi. Use it for what this installation is
+for, for example "You look after our home through Home Assistant". Edits reach a thread when its session next opens: right away
+for new threads, and after 15 idle minutes for running ones.
+
+## Tools
+`mcp.json` uses [pi's MCP configuration format](https://pi.dev/docs/latest/mcp), with one addition: `allowedUsers`, the
+Mattermost usernames who may have the agent call tools. It covers every tool call, the built-in web tools included, and
+a run gets tools only when every post it answers comes from one of them. Without `allowedUsers`, everyone may use tools.
+
+```json
+{
+  "allowedUsers": ["alice", "bob"],
+  "mcpServers": {
+    "homeassistant": {
+      "url": "http://homeassistant.local:8123/api/mcp",
+      "headers": { "Authorization": "Bearer ${HASS_TOKEN}" },
+      "exposure": "direct"
+    }
+  }
+}
+```
+
+Values such as `${HASS_TOKEN}` are read from the environment, so secrets can stay in `.env`. As in pi, a server's
+`exposure` defaults to `codemode`, where the model reaches its tools through scripts; `direct` declares them to the model
+like the built-in tools, which suits small models and small servers best. The `description` of every enabled server is
+shown to the model, whatever its exposure. `mcp.example.json` is a starting point.
+
+## Scheduled jobs
+With `SCHEDULER=true`, the agent gets a `schedule` tool: "remind me at 6 to close the garage", "every morning, check
+the weather". A job belongs to its thread. When it comes due, its prompt reaches the agent like a post, and the reply is
+posted to the thread. Scheduling is a tool call, so only `allowedUsers` can set up jobs, and jobs run with tools.
+
+Jobs are kept in the thread's session file, and a thread with jobs pending stays open past 15 idle minutes. They
+don't survive a restart well: a thread's jobs resume only once it gets a new post, and any that came due in the
+meantime, recurring ones included, are dropped. Intervals run from a minute to 24 days, and a thread can have 10 jobs.
 
 ## Running
 ```sh

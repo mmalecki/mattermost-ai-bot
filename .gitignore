@@ -1,3 +1,6 @@
 node_modules/
 data/
 .env
+mcp.json
+APPEND_SYSTEM.md
+eval/results/

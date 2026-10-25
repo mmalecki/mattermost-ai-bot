@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import type { Agent } from '../src/agent.ts';
+import type { ScheduledJob } from '../src/scheduler.ts';
 import { type Chat, type IncomingPost, type ThreadPost, Threads } from '../src/threads.ts';
 
 const BOT = 'bot';
@@ -34,6 +35,9 @@ class FakeChat implements Chat {
 interface FakeSession {
   prompts: string[];
   allowed: boolean[];
+  entries: unknown[];
+  onScheduled: ((job: ScheduledJob) => void) | undefined;
+  closed: boolean;
 }
 
 /** An agent whose sessions answer each prompt with `answer(prompt)`, or fail when it throws. */
@@ -41,10 +45,10 @@ function fakeAgent(answer: (prompt: string) => Promise<string> | string = () => 
   const sessions = new Map<string, FakeSession>();
   const agent: Agent = {
     hasSession: (rootId) => sessions.has(rootId),
-    async openSession(rootId, { allowHomeAssistant }) {
-      const record: FakeSession = { prompts: [], allowed: [] };
-      sessions.set(rootId, record);
+    async openSession(rootId, { allowTools, onScheduled }) {
       const entries: unknown[] = [];
+      const record: FakeSession = { prompts: [], allowed: [], entries, onScheduled, closed: false };
+      sessions.set(rootId, record);
       const messages: unknown[] = [];
       const session = {
         sessionManager: {
@@ -54,7 +58,7 @@ function fakeAgent(answer: (prompt: string) => Promise<string> | string = () => 
         messages,
         async prompt(text: string) {
           record.prompts.push(text);
-          record.allowed.push(allowHomeAssistant());
+          record.allowed.push(allowTools('websearch'));
           try {
             const reply = await answer(text);
             messages.push({ role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: reply }] });
@@ -62,18 +66,22 @@ function fakeAgent(answer: (prompt: string) => Promise<string> | string = () => 
             messages.push({ role: 'assistant', stopReason: 'error', errorMessage: (error as Error).message, content: [] });
           }
         },
-        dispose() {},
+        dispose: () => (record.closed = true),
       };
       return session as unknown as AgentSession;
+    },
+    async closeSession(session) {
+      session.dispose();
     },
   };
   return { agent, sessions };
 }
 
-function setup(answer?: (prompt: string) => Promise<string> | string) {
+/** `null` leaves out the allowlist. */
+function setup(answer?: (prompt: string) => Promise<string> | string, allowlist: string[] | null = ['maciej']) {
   const chat = new FakeChat();
   const { agent, sessions } = fakeAgent(answer);
-  const threads = new Threads(agent, chat, { botUserId: BOT, allowedUsers: new Set(['maciej']), idleMs: 60_000 });
+  const threads = new Threads(agent, chat, { botUserId: BOT, allowedUsers: allowlist ? new Set(allowlist) : undefined, idleMs: 60_000 });
   return { chat, sessions, threads };
 }
 
@@ -120,7 +128,7 @@ test('follow-ups in a known thread need no mention and carry only unseen posts',
 
   const { prompts } = sessions.get('r1')!;
   assert.equal(prompts.length, 2);
-  assert.match(prompts[0]!, /^@maciej \(.+\): @sailor lights\?$/);
+  assert.match(prompts[0]!, /^@maciej \(\d{4}-\d\d-\d\d \d\d:\d\d GMT[+-−]?\d*\): @sailor lights\?$/);
   assert.match(prompts[1]!, /^@guest \(.+\): and the heating\?$/);
   assert.equal(chat.replies.length, 2);
   threads.dispose();
@@ -156,13 +164,21 @@ test('posts arriving during a run are handed over together afterwards', async ()
   threads.dispose();
 });
 
-test('Home Assistant is allowed only when every author is on the allowlist', async () => {
+test('tools are allowed only when every author is on the allowlist', async () => {
   const { chat, sessions, threads } = setup();
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'lights on'), { id: 'r1', direct: true }));
   await threads.idle();
   threads.handle(incoming('r1', chat.add('r1', 'u2', 'lights off')));
   await threads.idle();
   assert.deepEqual(sessions.get('r1')!.allowed, [true, false]);
+  threads.dispose();
+});
+
+test('without an allowlist everyone may use tools', async () => {
+  const { chat, sessions, threads } = setup(undefined, null);
+  threads.handle(incoming('r1', chat.add('r1', 'u2', 'search this'), { id: 'r1', direct: true }));
+  await threads.idle();
+  assert.deepEqual(sessions.get('r1')!.allowed, [true]);
   threads.dispose();
 });
 
@@ -173,5 +189,65 @@ test('a failed run is reported in the thread', async () => {
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'hi'), { id: 'r1', direct: true }));
   await threads.idle();
   assert.deepEqual(chat.replies.map((r) => r.message), ["Sorry, I couldn't finish: rate limited"]);
+  threads.dispose();
+});
+
+test('a scheduled job that comes due is run with tools, and its answer posted to the thread', async () => {
+  const { chat, sessions, threads } = setup((prompt) => (prompt.startsWith('Scheduled') ? 'The garage is closed.' : 'ok'));
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'check the garage at 6'), { id: 'r1', direct: true }));
+  await threads.idle();
+  threads.handle(incoming('r1', chat.add('r1', 'u2', 'thanks')));
+  await threads.idle();
+
+  const session = sessions.get('r1')!;
+  session.onScheduled!({ id: 'j1', prompt: 'Check the garage' });
+  await threads.idle();
+  assert.match(session.prompts[2]!, /^Scheduled job j1 is due \(\d{4}-\d\d-\d\d \d\d:\d\d .+\): Check the garage$/);
+  // Only a run allowed tools could have scheduled it, whoever posted last.
+  assert.deepEqual(session.allowed, [true, false, true]);
+  assert.deepEqual(chat.replies.at(-1), { channelId: 'c1', rootId: 'r1', message: 'The garage is closed.' });
+  threads.dispose();
+});
+
+test('a job that comes due during a run waits for it, and for posts that came in meanwhile', async () => {
+  let release!: () => void;
+  const first = new Promise<void>((resolve) => (release = resolve));
+  const { chat, sessions, threads } = setup(async (prompt) => {
+    if (prompt.includes('first')) await first;
+    return 'ok';
+  });
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'first'), { id: 'r1', direct: true }));
+  await new Promise((resolve) => setImmediate(resolve));
+  sessions.get('r1')!.onScheduled!({ id: 'j1', prompt: 'Report' });
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'second')));
+  release();
+  await threads.idle();
+
+  const { prompts } = sessions.get('r1')!;
+  assert.equal(prompts.length, 3);
+  assert.match(prompts[1]!, /second$/);
+  assert.match(prompts[2]!, /^Scheduled job j1 is due .*: Report$/);
+  assert.equal(chat.replies.length, 3);
+  threads.dispose();
+});
+
+test('a thread stays open while its session has scheduled jobs pending', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { chat, sessions, threads } = setup();
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'remind me in 2 hours'), { id: 'r1', direct: true }));
+  await threads.idle();
+  const session = sessions.get('r1')!;
+  const snapshot = (status: string) => ({
+    type: 'custom',
+    customType: 'scheduler',
+    data: { timers: [{ id: 'j1', prompt: 'Remind', status, expiresAt: Date.now() + 2 * 3_600_000 }] },
+  });
+
+  session.entries.push(snapshot('active'));
+  t.mock.timers.tick(60_000);
+  assert.equal(session.closed, false);
+  session.entries.push(snapshot('cancelled'));
+  t.mock.timers.tick(60_000);
+  assert.equal(session.closed, true);
   threads.dispose();
 });
