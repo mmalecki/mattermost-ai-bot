@@ -3,6 +3,7 @@
 // Cases that would change something run with every tool call blocked, so nothing changes.
 //
 //   npm run eval -- --label qwen-no-thinking [--runs 10] [--concurrency 4] [--timeout 300] [--no-instructions]
+//     [--cases "scheduled turn-off,scheduled reminder"]
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,9 +18,10 @@ interface Case {
   post: string;
   /**
    * Which calls run. `read-only` blocks everything that could change something, and fails a run
-   * that tries; `none` blocks every call, and the attempt is what counts.
+   * that tries; `schedule` also lets it schedule jobs, which the eval never runs; `none` blocks every
+   * call, and the attempt is what counts.
    */
-  tools: 'read-only' | 'none';
+  tools: 'read-only' | 'schedule' | 'none';
   /** `tool`: must call an MCP tool before answering. `none`: must not call any tool. */
   expect: 'tool' | 'none';
   /** With every call blocked, the reply must say it couldn't do it, and not claim it did. */
@@ -28,6 +30,8 @@ interface Case {
   calls?: string;
   /** Tools it must not try, such as doing at once what was asked for later. */
   avoids?: RegExp;
+  /** It must schedule a one-off job due within this many milliseconds, `[min, max]`. */
+  schedules?: [number, number];
 }
 
 // Tools that can't change anything, for this installation. Read-only cases run only these.
@@ -49,6 +53,23 @@ const CASES: Case[] = [
     calls: 'schedule',
     avoids: /HassTurn|HassLightSet/,
   },
+  {
+    name: 'scheduled turn-off',
+    post: '@sailor in 30 seconds, switch off the workshop lights',
+    tools: 'schedule',
+    expect: 'tool',
+    calls: 'schedule',
+    avoids: /HassTurn|HassLightSet/,
+    schedules: [20_000, 60_000],
+  },
+  {
+    name: 'scheduled reminder',
+    post: '@sailor remind me in 2 minutes to check the oven',
+    tools: 'schedule',
+    expect: 'tool',
+    calls: 'schedule',
+    schedules: [90_000, 180_000],
+  },
   { name: 'small talk', post: '@sailor thanks, that is all for now', tools: 'read-only', expect: 'none' },
 ];
 
@@ -60,6 +81,8 @@ const { values } = parseArgs({
     /** Seconds before a run is aborted and failed, so a model stuck generating can't hold a slot. */
     timeout: { type: 'string', default: '300' },
     'no-instructions': { type: 'boolean', default: false },
+    /** Comma-separated case names to run, instead of all of them. */
+    cases: { type: 'string' },
   },
 });
 const runs = Number(values.runs);
@@ -76,12 +99,18 @@ interface Result {
   run: number;
   pass: boolean;
   toolCalls: string[];
+  /** The jobs it scheduled, as `interval_ms` with `r` for recurring. */
+  jobs: string[];
   seconds: number;
   reply: string;
   error?: string;
 }
 
-const jobs = CASES.flatMap((c) => Array.from({ length: runs }, (_, run) => ({ c, run })));
+const only = values.cases?.split(',').map((name) => name.trim());
+const cases = only ? CASES.filter((c) => only.includes(c.name)) : CASES;
+if (only && cases.length !== only.length) throw new Error(`Unknown case in --cases; cases are: ${CASES.map((c) => c.name).join(', ')}`);
+
+const jobs = cases.flatMap((c) => Array.from({ length: runs }, (_, run) => ({ c, run })));
 const results: Result[] = [];
 let next = 0;
 await Promise.all(
@@ -98,7 +127,7 @@ await Promise.all(
 async function runCase(c: Case, run: number): Promise<Result> {
   const started = Date.now();
   const session = await agent.openSession(`eval-${c.name.replace(/\W+/g, '-')}-${run}-${started}`, {
-    allowTools: (name) => c.tools === 'read-only' && READ_ONLY.test(name),
+    allowTools: (name) => c.tools !== 'none' && (READ_ONLY.test(name) || (c.tools === 'schedule' && name === 'schedule')),
     // Loads the scheduler when SCHEDULER is on; due jobs aren't run.
     onScheduled: () => {},
   });
@@ -110,7 +139,9 @@ async function runCase(c: Case, run: number): Promise<Result> {
   try {
     await session.prompt(formatPosts([{ id: 'p', userId: 'u', createAt: started, message: c.post }], ['mmalecki']), { expandPromptTemplates: false });
     const assistant = session.messages.filter((m) => m.role === 'assistant') as AssistantMessage[];
-    const toolCalls = assistant.flatMap((m) => m.content.flatMap((b) => (b.type === 'toolCall' ? [b.name] : [])));
+    const calls = assistant.flatMap((m) => m.content.flatMap((b) => (b.type === 'toolCall' ? [b] : [])));
+    const toolCalls = calls.map((b) => b.name);
+    const created = calls.filter((b) => b.name === 'schedule' && b.arguments.action === 'create');
     const last = assistant.at(-1);
     const reply = last?.content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('') ?? '';
     const called =
@@ -121,18 +152,29 @@ async function runCase(c: Case, run: number): Promise<Result> {
           : toolCalls.some((name) => name.startsWith('mcp__'));
     const honest = !c.admitsFailure || (ADMITS.test(reply) && !CLAIMS.test(reply.replace(ADMITS, '')));
     // In a read-only case, trying anything that could change something fails the run.
-    const sideEffects = c.tools === 'read-only' ? toolCalls.filter((name) => !READ_ONLY.test(name)) : [];
-    const pass = called && honest && sideEffects.length === 0;
+    const sideEffects =
+      c.tools === 'none' ? [] : toolCalls.filter((name) => !READ_ONLY.test(name) && !(c.tools === 'schedule' && name === 'schedule'));
+    // Exactly one one-off job, due in about the time asked for.
+    const scheduled =
+      !c.schedules ||
+      (created.length === 1 &&
+        created[0]!.arguments.recurring !== true &&
+        Number(created[0]!.arguments.interval_ms) >= c.schedules[0] &&
+        Number(created[0]!.arguments.interval_ms) <= c.schedules[1]);
+    const pass = called && honest && scheduled && sideEffects.length === 0 && !toolCalls.some((name) => c.avoids?.test(name));
     const error = timedOut ? `timed out after ${values.timeout}s` : last?.stopReason === 'error' ? last.errorMessage : undefined;
-    return { case: c.name, run, pass: pass && !error, toolCalls, seconds: (Date.now() - started) / 1000, reply, ...(error ? { error } : {}) };
+    const jobs = created.map((b) => `${b.arguments.interval_ms}${b.arguments.recurring === true ? 'r' : ''}`);
+    return { case: c.name, run, pass: pass && !error, toolCalls, jobs, seconds: (Date.now() - started) / 1000, reply, ...(error ? { error } : {}) };
   } finally {
     clearTimeout(timer);
-    session.dispose();
+    // As the bot does: shutting the extensions down also clears scheduled jobs, which would
+    // otherwise fire into the disposed session.
+    await agent.closeSession(session);
   }
 }
 
 console.log(`\n${values.label}: ${runs} runs per case${values['no-instructions'] ? ', without APPEND_SYSTEM.md' : ''}`);
-for (const c of CASES) {
+for (const c of cases) {
   const mine = results.filter((r) => r.case === c.name);
   const passed = mine.filter((r) => r.pass).length;
   const calls = mine.reduce((n, r) => n + r.toolCalls.length, 0) / mine.length;
