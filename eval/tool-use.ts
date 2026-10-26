@@ -32,6 +32,8 @@ interface Case {
   avoids?: RegExp;
   /** It must schedule a one-off job due within this many milliseconds, `[min, max]`. */
   schedules?: [number, number];
+  /** The reply must cite a URL. */
+  cites?: boolean;
 }
 
 // Tools that can't change anything, for this installation. Read-only cases run only these.
@@ -69,6 +71,14 @@ const CASES: Case[] = [
     expect: 'tool',
     calls: 'schedule',
     schedules: [90_000, 180_000],
+  },
+  {
+    name: 'web question',
+    post: "@sailor what's the latest stable Home Assistant release?",
+    tools: 'read-only',
+    expect: 'tool',
+    calls: 'websearch',
+    cites: true,
   },
   { name: 'small talk', post: '@sailor thanks, that is all for now', tools: 'read-only', expect: 'none' },
 ];
@@ -161,7 +171,8 @@ async function runCase(c: Case, run: number): Promise<Result> {
         created[0]!.arguments.recurring !== true &&
         Number(created[0]!.arguments.interval_ms) >= c.schedules[0] &&
         Number(created[0]!.arguments.interval_ms) <= c.schedules[1]);
-    const pass = called && honest && scheduled && sideEffects.length === 0 && !toolCalls.some((name) => c.avoids?.test(name));
+    const cited = !c.cites || /https?:\/\//.test(reply);
+    const pass = called && honest && scheduled && cited && sideEffects.length === 0 && !toolCalls.some((name) => c.avoids?.test(name));
     const error = timedOut ? `timed out after ${values.timeout}s` : last?.stopReason === 'error' ? last.errorMessage : undefined;
     const jobs = created.map((b) => `${b.arguments.interval_ms}${b.arguments.recurring === true ? 'r' : ''}`);
     return { case: c.name, run, pass: pass && !error, toolCalls, jobs, seconds: (Date.now() - started) / 1000, reply, ...(error ? { error } : {}) };
