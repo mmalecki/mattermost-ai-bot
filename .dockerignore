@@ -1,0 +1,8 @@
+.git/
+node_modules/
+data/
+.env
+mcp.json
+models.json
+APPEND_SYSTEM.md
+eval/results/

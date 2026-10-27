@@ -92,3 +92,17 @@ npm start
 
 On SIGINT or SIGTERM, the bot stops taking posts and exits once running threads finish their current run; a second
 signal exits at once.
+
+### Docker
+The image runs the bot as uid 1000, not root. `mcp.json`, `models.json` and `APPEND_SYSTEM.md` go in a directory
+mounted at `/config`, and `DATA_DIR` is `/data`. Leave `DATA_DIR` and `MCP_CONFIG` out of the `.env` the container
+gets, as paths for running outside it would replace these:
+
+```sh
+docker build -t mattermost-ai-bot .
+docker run -d --name mattermost-ai-bot --env-file .env -v "$PWD/config:/config:ro" -v mattermost-ai-bot:/data mattermost-ai-bot
+```
+
+`/data` must be writable by uid 1000 in the container. A named volume, as above, is. A host directory isn't under
+rootless Docker or Podman, where the container's uids map to subordinate ones: hand it over with
+`docker run --rm --user root -v "$PWD/data:/data" mattermost-ai-bot chown 1000:1000 /data`.
