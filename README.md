@@ -50,7 +50,8 @@ for new threads, and after 15 idle minutes for running ones.
 ## Tools
 `mcp.json` uses [pi's MCP configuration format](https://pi.dev/docs/latest/mcp), with one addition: `allowedUsers`, the
 Mattermost usernames who may have the agent call tools. It covers every tool call, the built-in web tools included, and
-a run gets tools only when every post it answers comes from one of them. Without `allowedUsers`, everyone may use tools.
+a thread has tools only while everyone who has posted in it is one of them: a single post from anyone else, even one
+deleted later, turns them off in that thread, scheduled jobs included. Without `allowedUsers`, everyone may use tools.
 
 ```json
 {
@@ -73,11 +74,13 @@ shown to the model, whatever its exposure. `mcp.example.json` is a starting poin
 ## Scheduled jobs
 With `SCHEDULER=true`, the agent gets a `schedule` tool: "remind me at 6 to close the garage", "every morning, check
 the weather". A job belongs to its thread. When it comes due, its prompt reaches the agent like a post, and the reply is
-posted to the thread. Scheduling is a tool call, so only `allowedUsers` can set up jobs, and jobs run with tools.
+posted to the thread. Scheduling is a tool call, so only `allowedUsers` can set up jobs, and a job gets tools only while
+its thread still has them.
 
 Jobs are kept in the thread's session file, and a thread with jobs pending stays open past 15 idle minutes. They
 don't survive a restart well: a thread's jobs resume only once it gets a new post, and any that came due in the
-meantime, recurring ones included, are dropped. Intervals run from a minute to 24 days, and a thread can have 10 jobs.
+meantime, recurring ones included, are dropped. Intervals run up to 24 days, from 5 seconds for a one-off job and a
+minute for a recurring one, and a thread can have 10 jobs.
 
 ## Running
 ```sh
@@ -86,3 +89,6 @@ npm start
 ```
 
 `npm test` runs the tests, `npm run typecheck` checks types.
+
+On SIGINT or SIGTERM, the bot stops taking posts and exits once running threads finish their current run; a second
+signal exits at once.

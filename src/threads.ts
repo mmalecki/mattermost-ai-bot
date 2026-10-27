@@ -38,8 +38,15 @@ export interface ThreadsOptions {
   idleMs: number;
 }
 
-/** Session entry recording the newest post the agent has seen. Not part of the model's context. */
+/** Session entry recording the posts handed to the agent. Not part of the model's context. */
 const SEEN_ENTRY = 'mattermost';
+
+interface SeenEntry {
+  /** The newest post's. */
+  createAt: number;
+  /** The posts' authors. Missing from sessions older than it. */
+  userIds?: string[];
+}
 const TYPING_INTERVAL_MS = 3_000;
 
 /**
@@ -52,6 +59,7 @@ export class Threads {
   readonly chat: Chat;
   readonly options: ThreadsOptions;
   readonly #threads = new Map<string, Thread>();
+  #closed = false;
 
   constructor(agent: Agent, chat: Chat, options: ThreadsOptions) {
     this.agent = agent;
@@ -60,7 +68,7 @@ export class Threads {
   }
 
   handle(post: IncomingPost): void {
-    if (post.userId === this.options.botUserId || post.type) return;
+    if (this.#closed || post.userId === this.options.botUserId || post.type) return;
     const rootId = post.rootId || post.id;
     const known = this.#threads.has(rootId) || this.agent.hasSession(rootId);
     if (!known && !post.direct && !post.mentioned) return;
@@ -78,9 +86,12 @@ export class Threads {
     await Promise.all([...this.#threads.values()].map((t) => t.running));
   }
 
-  dispose(): void {
-    for (const thread of this.#threads.values()) thread.dispose();
+  /** Stops taking posts and jobs, lets running threads finish their current run, and closes every session. */
+  async close(): Promise<void> {
+    this.#closed = true;
+    const threads = [...this.#threads.values()];
     this.#threads.clear();
+    await Promise.all(threads.map((t) => t.close()));
   }
 }
 
@@ -88,46 +99,57 @@ class Thread {
   readonly threads: Threads;
   readonly channelId: string;
   readonly rootId: string;
-  readonly onDispose: () => void;
+  readonly onClose: () => void;
   running: Promise<void> | undefined;
   #session: AgentSession | undefined;
   #pending = false;
   /** Scheduled jobs that came due, run after any new posts. */
   readonly #jobs: ScheduledJob[] = [];
-  /** Whether everyone the agent is answering may have it call tools. */
+  /** Whether the current run may call tools. */
   #allowed = false;
   #idleTimer: NodeJS.Timeout | undefined;
-  #disposed = false;
+  #closed = false;
 
-  constructor(threads: Threads, channelId: string, rootId: string, onDispose: () => void) {
+  constructor(threads: Threads, channelId: string, rootId: string, onClose: () => void) {
     this.threads = threads;
     this.channelId = channelId;
     this.rootId = rootId;
-    this.onDispose = onDispose;
+    this.onClose = onClose;
   }
 
   wake(): void {
+    if (this.#closed) return;
     this.#pending = true;
     this.#start();
   }
 
   due(job: ScheduledJob): void {
-    if (this.#disposed) return;
+    if (this.#closed) {
+      // The extension has already counted it as run, so it won't come due again.
+      console.warn(`Thread ${this.rootId}: closing, so scheduled job ${job.id} is dropped`);
+      return;
+    }
     this.#jobs.push(job);
     this.#start();
   }
 
-  dispose(): void {
-    this.#disposed = true;
+  /**
+   * Lets the current run finish, then closes the session. Posts that came in meanwhile stay unseen, so
+   * the thread's next run picks them up.
+   */
+  async close(): Promise<void> {
+    this.#closed = true;
     clearTimeout(this.#idleTimer);
-    if (this.#session) void this.threads.agent.closeSession(this.#session);
+    await this.running;
+    const session = this.#session;
     this.#session = undefined;
+    if (session) await this.threads.agent.closeSession(session);
   }
 
   #start(): void {
     this.running ??= this.#run().finally(() => {
       this.running = undefined;
-      this.#scheduleIdle();
+      if (!this.#closed) this.#scheduleIdle();
     });
   }
 
@@ -137,7 +159,7 @@ class Thread {
     chat.typing(this.channelId, this.rootId);
     const typing = setInterval(() => chat.typing(this.channelId, this.rootId), TYPING_INTERVAL_MS);
     try {
-      while (this.#pending || this.#jobs.length) {
+      while (!this.#closed && (this.#pending || this.#jobs.length)) {
         const job = this.#pending ? undefined : this.#jobs.shift();
         this.#pending = false;
         try {
@@ -157,32 +179,48 @@ class Thread {
   }
 
   async #answerPosts(session: AgentSession): Promise<void> {
-    const { chat, options } = this.threads;
-    const seen = lastSeen(session);
-    const posts = (await chat.threadPosts(this.rootId)).filter((p) => p.createAt > seen);
+    const { chat } = this.threads;
+    const thread = await chat.threadPosts(this.rootId);
+    const posts = thread.filter((p) => p.createAt > seenPosts(session).createAt);
     const last = posts.at(-1);
     if (!last) return;
 
     const names = await Promise.all(posts.map((p) => chat.username(p.userId)));
-    const { allowedUsers } = options;
-    this.#allowed = !allowedUsers || names.every((name) => allowedUsers.has(name));
+    this.#allowed = await this.#mayUseTools(session, thread);
     // Recorded first, so a failing run doesn't send the same posts again.
-    session.sessionManager.appendCustomEntry(SEEN_ENTRY, { createAt: last.createAt });
+    const seen: SeenEntry = { createAt: last.createAt, userIds: [...new Set(posts.map((p) => p.userId))] };
+    session.sessionManager.appendCustomEntry(SEEN_ENTRY, seen);
 
     console.log(`Thread ${this.rootId}: ${posts.length} new post(s) from ${[...new Set(names)].join(', ')}`);
     await this.#answer(session, formatPosts(posts, names));
   }
 
   async #runJob(session: AgentSession, job: ScheduledJob): Promise<void> {
-    // Only a run allowed tools can schedule jobs, as schedule is a tool, so its jobs are too.
-    this.#allowed = true;
+    this.#allowed = await this.#mayUseTools(session, await this.threads.chat.threadPosts(this.rootId));
     console.log(`Thread ${this.rootId}: scheduled job ${job.id} is due`);
     await this.#answer(session, formatJob(job, Date.now()));
   }
 
+  /**
+   * Whether everyone who has posted in the thread may have the agent call tools, so a single post from
+   * anyone else turns them off. Authors of deleted posts count too, from the session, as the agent has
+   * seen what they wrote, and an author who can no longer be looked up isn't allowed.
+   */
+  async #mayUseTools(session: AgentSession, thread: ThreadPost[]): Promise<boolean> {
+    const { chat, options } = this.threads;
+    const { allowedUsers } = options;
+    if (!allowedUsers) return true;
+    const userIds = new Set([...seenPosts(session).userIds, ...thread.map((p) => p.userId)]);
+    const names = await Promise.all([...userIds].map((id) => chat.username(id).catch(() => undefined)));
+    return names.every((name) => name !== undefined && allowedUsers.has(name));
+  }
+
   async #answer(session: AgentSession, prompt: string): Promise<void> {
+    const startedAt = Date.now();
     await session.prompt(prompt, { expandPromptTemplates: false });
-    const reply = replyText(session);
+    const reply = replyText(session, startedAt);
+    // pi drops an answer cut off at the output limit to compact and retry, and the retry may not happen.
+    if (reply === NO_ANSWER) console.warn(`Thread ${this.rootId}: the run added no answer`);
     if (reply) await this.threads.chat.reply(this.channelId, this.rootId, reply);
     console.log(`Thread ${this.rootId}: replied (${reply?.length ?? 0} chars)`);
   }
@@ -192,20 +230,24 @@ class Thread {
     this.#idleTimer = setTimeout(() => {
       // Scheduled jobs live in the session, so it stays open while it has some.
       if (this.#session && pendingJobs(this.#session.sessionManager.getEntries()).length) return this.#scheduleIdle();
-      this.dispose();
-      this.onDispose();
+      this.onClose();
+      void this.close();
     }, this.threads.options.idleMs);
     this.#idleTimer.unref();
   }
 }
 
-function lastSeen(session: AgentSession): number {
-  const entries = session.sessionManager.getEntries();
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i];
-    if (entry?.type === 'custom' && entry.customType === SEEN_ENTRY) return (entry.data as { createAt: number }).createAt;
+/** The posts handed to the agent so far: up to which one, and by whom. */
+function seenPosts(session: AgentSession): { createAt: number; userIds: Set<string> } {
+  let createAt = 0;
+  const userIds = new Set<string>();
+  for (const entry of session.sessionManager.getEntries()) {
+    if (entry.type !== 'custom' || entry.customType !== SEEN_ENTRY) continue;
+    const seen = entry.data as SeenEntry;
+    createAt = Math.max(createAt, seen.createAt);
+    for (const id of seen.userIds ?? []) userIds.add(id);
   }
-  return 0;
+  return { createAt, userIds };
 }
 
 // With its UTC offset, so the model can compare post times with tool results in other zones.
@@ -227,17 +269,26 @@ export function formatJob(job: ScheduledJob, now: number): string {
   return `Scheduled job ${job.id} is due (${timeFormat.format(now)}): ${job.prompt}`;
 }
 
-/** The text of the run's final answer, or what went wrong. */
-function replyText(session: AgentSession): string | undefined {
+const NO_ANSWER = "Sorry, I couldn't come up with an answer.";
+
+/**
+ * The text of the final answer of the run started at `startedAt`, or what went wrong. Messages are
+ * stamped with when their request started, so an earlier run's answer is never taken for this one's.
+ */
+function replyText(session: AgentSession, startedAt: number): string | undefined {
   const message = session.messages.findLast((m) => m.role === 'assistant') as AssistantMessage | undefined;
-  if (!message) return undefined;
+  if (!message || !(message.timestamp >= startedAt)) return NO_ANSWER;
   if (message.stopReason === 'error' || message.stopReason === 'aborted') {
     return `Sorry, I couldn't finish: ${message.errorMessage ?? message.stopReason}`;
   }
-  return message.content
+  const text = message.content
     .flatMap((c) => (c.type === 'text' ? [c.text] : []))
     .join('')
-    .trim() || undefined;
+    .trim();
+  if (message.stopReason === 'length') {
+    return text ? `${text}\n\n_(Cut off at the output limit.)_` : "Sorry, I couldn't finish: I reached the output limit.";
+  }
+  return text || undefined;
 }
 
 function errorMessage(error: unknown): string {

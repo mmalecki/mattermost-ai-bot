@@ -60,6 +60,16 @@ export async function createAgent(config: Config, botUsername: string): Promise<
   const systemPrompt = buildSystemPrompt(botUsername, config.tools.mcpServers, !!schedulerExtension);
   const sessionFile = (rootId: string) => join(sessionDir, `${rootId}.jsonl`);
 
+  async function closeSession(session: AgentSession): Promise<void> {
+    // As pi's own runtime does: dispose() alone leaves the extensions running.
+    try {
+      await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+    } catch (error) {
+      console.error('Session shutdown failed:', error);
+    }
+    session.dispose();
+  }
+
   return {
     hasSession: (rootId) => existsSync(sessionFile(rootId)),
 
@@ -106,20 +116,20 @@ export async function createAgent(config: Config, botUsername: string): Promise<
         sessionManager: SessionManager.open(sessionFile(rootId), sessionDir, config.dataDir),
         settingsManager: SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true, maxRetries: 2 } }),
       });
-      // Starts the extensions, which connects the MCP servers.
-      await session.bindExtensions({});
+      // Starts the extensions, which connects the MCP servers. pi catches what their handlers throw and
+      // only reports it here; anything else that fails shuts the session down again.
+      try {
+        await session.bindExtensions({
+          onError: (e) => console.error(`Extension ${e.extensionPath} failed on ${e.event}: ${e.error}`),
+        });
+      } catch (error) {
+        await closeSession(session);
+        throw error;
+      }
       return session;
     },
 
-    async closeSession(session) {
-      // As pi's own runtime does: dispose() alone leaves the extensions running.
-      try {
-        await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
-      } catch (error) {
-        console.error('Session shutdown failed:', error);
-      }
-      session.dispose();
-    },
+    closeSession,
   };
 }
 
