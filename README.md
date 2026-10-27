@@ -79,7 +79,8 @@ its thread still has them.
 
 Jobs are kept in the thread's session file, and a thread with jobs pending stays open past 15 idle minutes. They
 don't survive a restart well: a thread's jobs resume only once it gets a new post, and any that came due in the
-meantime, recurring ones included, are dropped. Intervals run from a minute to 24 days, and a thread can have 10 jobs.
+meantime, recurring ones included, are dropped. Intervals run up to 24 days, from 5 seconds for a one-off job and a
+minute for a recurring one, and a thread can have 10 jobs.
 
 ## Running
 ```sh
