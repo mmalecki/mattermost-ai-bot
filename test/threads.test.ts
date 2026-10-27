@@ -48,8 +48,8 @@ interface FakeSession {
   closed: boolean;
 }
 
-/** An agent whose sessions answer each prompt with `answer(prompt)`, or fail when it throws. */
-function fakeAgent(answer: (prompt: string) => Promise<string> | string = () => 'ok') {
+/** An agent whose sessions answer each prompt with `answer(prompt)`, fail when it throws, and add no message for `null`. */
+function fakeAgent(answer: (prompt: string) => Promise<string | null> | string | null = () => 'ok') {
   const sessions = new Map<string, FakeSession>();
   const agent: Agent = {
     hasSession: (rootId) => sessions.has(rootId),
@@ -68,10 +68,11 @@ function fakeAgent(answer: (prompt: string) => Promise<string> | string = () => 
           record.prompts.push(text);
           record.allowed.push(allowTools('websearch'));
           try {
+            const timestamp = Date.now();
             const reply = await answer(text);
-            messages.push({ role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: reply }] });
+            if (reply !== null) messages.push({ role: 'assistant', stopReason: 'stop', timestamp, content: [{ type: 'text', text: reply }] });
           } catch (error) {
-            messages.push({ role: 'assistant', stopReason: 'error', errorMessage: (error as Error).message, content: [] });
+            messages.push({ role: 'assistant', stopReason: 'error', timestamp: Date.now(), errorMessage: (error as Error).message, content: [] });
           }
         },
         dispose: () => (record.closed = true),
@@ -86,7 +87,7 @@ function fakeAgent(answer: (prompt: string) => Promise<string> | string = () => 
 }
 
 /** `null` leaves out the allowlist. */
-function setup(answer?: (prompt: string) => Promise<string> | string, allowlist: string[] | null = ['maciej']) {
+function setup(answer?: (prompt: string) => Promise<string | null> | string | null, allowlist: string[] | null = ['maciej']) {
   const chat = new FakeChat();
   const { agent, sessions } = fakeAgent(answer);
   const threads = new Threads(agent, chat, { botUserId: BOT, allowedUsers: allowlist ? new Set(allowlist) : undefined, idleMs: 60_000 });
@@ -234,6 +235,19 @@ test('a failed run is reported in the thread', async () => {
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'hi'), { id: 'r1', direct: true }));
   await threads.idle();
   assert.deepEqual(chat.replies.map((r) => r.message), ["Sorry, I couldn't finish: rate limited"]);
+  await threads.close();
+});
+
+test("a run that adds no answer says so, and doesn't post the previous one again", async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 25, 16) });
+  const { chat, threads } = setup((prompt) => (prompt.includes('first') ? 'ok' : null));
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'first'), { id: 'r1', direct: true }));
+  await threads.idle();
+  t.mock.timers.tick(1_000);
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'second')));
+  t.mock.method(console, 'warn', () => {});
+  await threads.idle();
+  assert.deepEqual(chat.replies.map((r) => r.message), ['ok', "Sorry, I couldn't come up with an answer."]);
   await threads.close();
 });
 

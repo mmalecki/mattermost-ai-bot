@@ -216,8 +216,11 @@ class Thread {
   }
 
   async #answer(session: AgentSession, prompt: string): Promise<void> {
+    const startedAt = Date.now();
     await session.prompt(prompt, { expandPromptTemplates: false });
-    const reply = replyText(session);
+    const reply = replyText(session, startedAt);
+    // pi drops an answer cut off at the output limit to compact and retry, and the retry may not happen.
+    if (reply === NO_ANSWER) console.warn(`Thread ${this.rootId}: the run added no answer`);
     if (reply) await this.threads.chat.reply(this.channelId, this.rootId, reply);
     console.log(`Thread ${this.rootId}: replied (${reply?.length ?? 0} chars)`);
   }
@@ -266,10 +269,15 @@ export function formatJob(job: ScheduledJob, now: number): string {
   return `Scheduled job ${job.id} is due (${timeFormat.format(now)}): ${job.prompt}`;
 }
 
-/** The text of the run's final answer, or what went wrong. */
-function replyText(session: AgentSession): string | undefined {
+const NO_ANSWER = "Sorry, I couldn't come up with an answer.";
+
+/**
+ * The text of the final answer of the run started at `startedAt`, or what went wrong. Messages are
+ * stamped with when their request started, so an earlier run's answer is never taken for this one's.
+ */
+function replyText(session: AgentSession, startedAt: number): string | undefined {
   const message = session.messages.findLast((m) => m.role === 'assistant') as AssistantMessage | undefined;
-  if (!message) return undefined;
+  if (!message || !(message.timestamp >= startedAt)) return NO_ANSWER;
   if (message.stopReason === 'error' || message.stopReason === 'aborted') {
     return `Sorry, I couldn't finish: ${message.errorMessage ?? message.stopReason}`;
   }
