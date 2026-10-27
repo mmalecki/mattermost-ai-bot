@@ -209,6 +209,26 @@ test('a scheduled job that comes due is run with tools, and its answer posted to
   threads.dispose();
 });
 
+test('a thread disposed during a run starts no further runs', async () => {
+  let release!: () => void;
+  const first = new Promise<void>((resolve) => (release = resolve));
+  const { chat, sessions, threads } = setup(async (prompt) => {
+    if (prompt.includes('first')) await first;
+    return 'ok';
+  });
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'first'), { id: 'r1', direct: true }));
+  await new Promise((resolve) => setImmediate(resolve));
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'second')));
+  const session = sessions.get('r1')!;
+  threads.dispose();
+  release();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(session.prompts.length, 1);
+  // Not reopened, which would leave a session nothing closes.
+  assert.equal(sessions.get('r1'), session);
+});
+
 test('a job that comes due during a run waits for it, and for posts that came in meanwhile', async () => {
   let release!: () => void;
   const first = new Promise<void>((resolve) => (release = resolve));

@@ -107,6 +107,7 @@ class Thread {
   }
 
   wake(): void {
+    if (this.#disposed) return;
     this.#pending = true;
     this.#start();
   }
@@ -127,7 +128,7 @@ class Thread {
   #start(): void {
     this.running ??= this.#run().finally(() => {
       this.running = undefined;
-      this.#scheduleIdle();
+      if (!this.#disposed) this.#scheduleIdle();
     });
   }
 
@@ -137,7 +138,7 @@ class Thread {
     chat.typing(this.channelId, this.rootId);
     const typing = setInterval(() => chat.typing(this.channelId, this.rootId), TYPING_INTERVAL_MS);
     try {
-      while (this.#pending || this.#jobs.length) {
+      while (!this.#disposed && (this.#pending || this.#jobs.length)) {
         const job = this.#pending ? undefined : this.#jobs.shift();
         this.#pending = false;
         try {
