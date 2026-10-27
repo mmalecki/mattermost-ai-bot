@@ -27,9 +27,12 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     stopping = true;
     console.log(`${signal}: shutting down once running threads finish; ${signal} again to exit now`);
     mattermost.close();
-    threads
-      .close()
-      .catch((error: unknown) => console.error('Shutdown failed:', error))
-      .finally(() => process.exit(0));
+    threads.close().then(
+      () => process.exit(0),
+      (error: unknown) => {
+        console.error('Shutdown failed:', error);
+        process.exit(1);
+      },
+    );
   });
 }
