@@ -1,5 +1,7 @@
 import type { ExtensionFactory, McpServerConfig } from '@earendil-works/pi-coding-agent';
 
+const BLOCKED = 'Tools are off in this thread: someone who has posted in it is not allowed to use them.';
+
 /**
  * Registers the configured MCP servers with pi's MCP extension, which validates each config and
  * resolves `${VAR}` references in it when connecting. An invalid server is reported and skipped.
@@ -32,11 +34,11 @@ export function stripCwd(systemPrompt: string): string {
 }
 
 /**
- * Blocks every tool call, nested ones from codemode scripts included, unless whoever the agent is
- * currently answering may use tools. Asked on every call, with the tool's name.
+ * Blocks every tool call, nested ones from codemode scripts included, unless everyone in the thread
+ * may use tools. Asked on every call, with the tool's name.
  */
 export function toolGuard(allowed: (toolName: string) => boolean): ExtensionFactory {
   return (pi) => {
-    pi.on('tool_call', (event) => (allowed(event.toolName) ? undefined : { block: true, reason: 'This user is not allowed to use tools.' }));
+    pi.on('tool_call', (event) => (allowed(event.toolName) ? undefined : { block: true, reason: BLOCKED }));
   };
 }

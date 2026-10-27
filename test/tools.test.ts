@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { mcpServers, stripCwd, toolGuard } from '../src/tools.ts';
 
+const BLOCKED = 'Tools are off in this thread: someone who has posted in it is not allowed to use them.';
+
 test('registers each configured MCP server, skipping ones pi rejects', (t) => {
   const registered: string[] = [];
   const pi = {
@@ -26,7 +28,7 @@ test('blocks every tool call unless allowed', () => {
   assert.equal(onToolCall({ toolName: 'websearch' }), undefined);
   allowed = false;
   for (const toolName of ['websearch', 'mcp__home__intent__HassTurnOn', 'codemode']) {
-    assert.deepEqual(onToolCall({ toolName }), { block: true, reason: 'This user is not allowed to use tools.' });
+    assert.deepEqual(onToolCall({ toolName }), { block: true, reason: BLOCKED });
   }
 });
 
@@ -41,5 +43,5 @@ test('tells the guard which tool is called', () => {
   const pi = { on: (_event: string, handler: typeof onToolCall) => (onToolCall = handler) };
   toolGuard((name) => name === 'websearch')(pi as unknown as ExtensionAPI);
   assert.equal(onToolCall({ toolName: 'websearch' }), undefined);
-  assert.deepEqual(onToolCall({ toolName: 'mcp__home__intent__HassTurnOn' }), { block: true, reason: 'This user is not allowed to use tools.' });
+  assert.deepEqual(onToolCall({ toolName: 'mcp__home__intent__HassTurnOn' }), { block: true, reason: BLOCKED });
 });

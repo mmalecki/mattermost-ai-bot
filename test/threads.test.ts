@@ -6,15 +6,19 @@ import type { ScheduledJob } from '../src/scheduler.ts';
 import { type Chat, type IncomingPost, type ThreadPost, Threads } from '../src/threads.ts';
 
 const BOT = 'bot';
-const USERS: Record<string, string> = { u1: 'maciej', u2: 'guest' };
+const USERS: Record<string, string> = { u1: 'maciej', u2: 'guest', u3: 'carol' };
 
 class FakeChat implements Chat {
   posts = new Map<string, ThreadPost[]>();
   replies: { channelId: string; rootId: string; message: string }[] = [];
+  /** Posts ever added to each thread, deleted ones included. */
+  #counts = new Map<string, number>();
 
   add(rootId: string, userId: string, message: string): ThreadPost {
     const thread = this.posts.get(rootId) ?? [];
-    const post = { id: `p${thread.length}`, userId, createAt: Date.UTC(2026, 9, 25, 16, thread.length), message };
+    const n = this.#counts.get(rootId) ?? 0;
+    this.#counts.set(rootId, n + 1);
+    const post = { id: `p${n}`, userId, createAt: Date.UTC(2026, 9, 25, 16, n), message };
     thread.push(post);
     this.posts.set(rootId, thread);
     return post;
@@ -23,7 +27,11 @@ class FakeChat implements Chat {
   async threadPosts(rootId: string) {
     return [...(this.posts.get(rootId) ?? [])];
   }
+  /** Users whose lookups fail, as for one deleted since. */
+  gone = new Set<string>();
+
   async username(userId: string) {
+    if (this.gone.has(userId)) throw new Error(`no user ${userId}`);
     return USERS[userId] ?? userId;
   }
   async reply(channelId: string, rootId: string, message: string) {
@@ -164,13 +172,50 @@ test('posts arriving during a run are handed over together afterwards', async ()
   await threads.close();
 });
 
-test('tools are allowed only when every author is on the allowlist', async () => {
+test('a thread has tools only while everyone who has posted in it is on the allowlist', async () => {
   const { chat, sessions, threads } = setup();
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'lights on'), { id: 'r1', direct: true }));
   await threads.idle();
   threads.handle(incoming('r1', chat.add('r1', 'u2', 'lights off')));
   await threads.idle();
+  // An allowed user's post doesn't bring them back: the guest's request is still in the context.
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'ok, do it')));
+  await threads.idle();
+  assert.deepEqual(sessions.get('r1')!.allowed, [true, false, false]);
+  await threads.close();
+});
+
+test('a deleted post still keeps tools off in its thread', async () => {
+  const { chat, sessions, threads } = setup();
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'lights on'), { id: 'r1', direct: true }));
+  await threads.idle();
+  threads.handle(incoming('r1', chat.add('r1', 'u2', 'lights off')));
+  await threads.idle();
+  chat.posts.get('r1')!.splice(1, 1);
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'ok, do it')));
+  await threads.idle();
+  assert.deepEqual(sessions.get('r1')!.allowed, [true, false, false]);
+  await threads.close();
+});
+
+test('posts from before the bot was mentioned count too', async () => {
+  const { chat, sessions, threads } = setup();
+  chat.add('r1', 'u2', 'turn everything off');
+  threads.handle(incoming('r1', chat.add('r1', 'u1', '@sailor go ahead'), { mentioned: true }));
+  await threads.idle();
+  assert.deepEqual(sessions.get('r1')!.allowed, [false]);
+  await threads.close();
+});
+
+test("an author who can't be looked up any more turns tools off, and the thread still gets answers", async () => {
+  const { chat, sessions, threads } = setup(undefined, ['maciej', 'carol']);
+  threads.handle(incoming('r1', chat.add('r1', 'u3', 'lights on'), { id: 'r1', direct: true }));
+  await threads.idle();
+  chat.gone.add('u3');
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'and the heating')));
+  await threads.idle();
   assert.deepEqual(sessions.get('r1')!.allowed, [true, false]);
+  assert.deepEqual(chat.replies.map((r) => r.message), ['ok', 'ok']);
   await threads.close();
 });
 
@@ -192,20 +237,31 @@ test('a failed run is reported in the thread', async () => {
   await threads.close();
 });
 
-test('a scheduled job that comes due is run with tools, and its answer posted to the thread', async () => {
+test('a scheduled job that comes due is run, and its answer posted to the thread', async () => {
   const { chat, sessions, threads } = setup((prompt) => (prompt.startsWith('Scheduled') ? 'The garage is closed.' : 'ok'));
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'check the garage at 6'), { id: 'r1', direct: true }));
-  await threads.idle();
-  threads.handle(incoming('r1', chat.add('r1', 'u2', 'thanks')));
   await threads.idle();
 
   const session = sessions.get('r1')!;
   session.onScheduled!({ id: 'j1', prompt: 'Check the garage' });
   await threads.idle();
-  assert.match(session.prompts[2]!, /^Scheduled job j1 is due \(\d{4}-\d\d-\d\d \d\d:\d\d .+\): Check the garage$/);
-  // Only a run allowed tools could have scheduled it, whoever posted last.
-  assert.deepEqual(session.allowed, [true, false, true]);
+  assert.match(session.prompts[1]!, /^Scheduled job j1 is due \(\d{4}-\d\d-\d\d \d\d:\d\d .+\): Check the garage$/);
+  assert.deepEqual(session.allowed, [true, true]);
   assert.deepEqual(chat.replies.at(-1), { channelId: 'c1', rootId: 'r1', message: 'The garage is closed.' });
+  await threads.close();
+});
+
+test('a scheduled job gets no tools once someone not on the allowlist has posted', async () => {
+  const { chat, sessions, threads } = setup();
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'check the garage at 6'), { id: 'r1', direct: true }));
+  await threads.idle();
+  threads.handle(incoming('r1', chat.add('r1', 'u2', 'and open it')));
+  await threads.idle();
+
+  const session = sessions.get('r1')!;
+  session.onScheduled!({ id: 'j1', prompt: 'Check the garage' });
+  await threads.idle();
+  assert.deepEqual(session.allowed, [true, false, false]);
   await threads.close();
 });
 
