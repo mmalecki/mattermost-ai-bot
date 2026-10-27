@@ -40,6 +40,9 @@ class FakeChat implements Chat {
   typing() {}
 }
 
+type Reply = string | { text: string; stopReason: string } | null;
+type Answer = (prompt: string) => Promise<Reply> | Reply;
+
 interface FakeSession {
   prompts: string[];
   allowed: boolean[];
@@ -48,8 +51,11 @@ interface FakeSession {
   closed: boolean;
 }
 
-/** An agent whose sessions answer each prompt with `answer(prompt)`, fail when it throws, and add no message for `null`. */
-function fakeAgent(answer: (prompt: string) => Promise<string | null> | string | null = () => 'ok') {
+/**
+ * An agent whose sessions answer each prompt with `answer(prompt)`, fail when it throws, and add no
+ * message for `null`. An answer may give its stop reason.
+ */
+function fakeAgent(answer: Answer = () => 'ok') {
   const sessions = new Map<string, FakeSession>();
   const agent: Agent = {
     hasSession: (rootId) => sessions.has(rootId),
@@ -70,7 +76,8 @@ function fakeAgent(answer: (prompt: string) => Promise<string | null> | string |
           try {
             const timestamp = Date.now();
             const reply = await answer(text);
-            if (reply !== null) messages.push({ role: 'assistant', stopReason: 'stop', timestamp, content: [{ type: 'text', text: reply }] });
+            const { text: answered, stopReason } = typeof reply === 'string' ? { text: reply, stopReason: 'stop' } : (reply ?? {});
+            if (reply !== null) messages.push({ role: 'assistant', stopReason, timestamp, content: [{ type: 'text', text: answered }] });
           } catch (error) {
             messages.push({ role: 'assistant', stopReason: 'error', timestamp: Date.now(), errorMessage: (error as Error).message, content: [] });
           }
@@ -87,7 +94,7 @@ function fakeAgent(answer: (prompt: string) => Promise<string | null> | string |
 }
 
 /** `null` leaves out the allowlist. */
-function setup(answer?: (prompt: string) => Promise<string | null> | string | null, allowlist: string[] | null = ['maciej']) {
+function setup(answer?: Answer, allowlist: string[] | null = ['maciej']) {
   const chat = new FakeChat();
   const { agent, sessions } = fakeAgent(answer);
   const threads = new Threads(agent, chat, { botUserId: BOT, allowedUsers: allowlist ? new Set(allowlist) : undefined, idleMs: 60_000 });
@@ -248,6 +255,19 @@ test("a run that adds no answer says so, and doesn't post the previous one again
   t.mock.method(console, 'warn', () => {});
   await threads.idle();
   assert.deepEqual(chat.replies.map((r) => r.message), ['ok', "Sorry, I couldn't come up with an answer."]);
+  await threads.close();
+});
+
+test('an answer cut off at the output limit says so', async () => {
+  const { chat, threads } = setup((prompt) => ({ text: prompt.includes('long') ? 'Part of it' : '', stopReason: 'length' }));
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'a long answer'), { id: 'r1', direct: true }));
+  await threads.idle();
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'all reasoning')));
+  await threads.idle();
+  assert.deepEqual(chat.replies.map((r) => r.message), [
+    'Part of it\n\n_(Cut off at the output limit.)_',
+    "Sorry, I couldn't finish: I reached the output limit.",
+  ]);
   await threads.close();
 });
 

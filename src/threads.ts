@@ -281,10 +281,14 @@ function replyText(session: AgentSession, startedAt: number): string | undefined
   if (message.stopReason === 'error' || message.stopReason === 'aborted') {
     return `Sorry, I couldn't finish: ${message.errorMessage ?? message.stopReason}`;
   }
-  return message.content
+  const text = message.content
     .flatMap((c) => (c.type === 'text' ? [c.text] : []))
     .join('')
-    .trim() || undefined;
+    .trim();
+  if (message.stopReason === 'length') {
+    return text ? `${text}\n\n_(Cut off at the output limit.)_` : "Sorry, I couldn't finish: I reached the output limit.";
+  }
+  return text || undefined;
 }
 
 function errorMessage(error: unknown): string {
