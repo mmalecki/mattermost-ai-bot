@@ -43,7 +43,9 @@ export class Mattermost implements Chat {
   }
 
   async threadPosts(rootId: string): Promise<ThreadPost[]> {
-    const { posts } = await this.#client.getPostThread(rootId);
+    // getPostThread stops at the first 60 posts, so a longer thread would never show new ones.
+    const { posts, has_next } = await this.#client.getPaginatedPostThread(rootId, { fetchAll: true });
+    if (has_next) console.warn(`Thread ${rootId}: the server held back some of its posts, so the newest may be missing`);
     return Object.values(posts)
       .filter((p) => p.user_id !== this.botUserId && !p.type && !p.delete_at)
       .sort((a, b) => a.create_at - b.create_at)
