@@ -95,7 +95,8 @@ signal exits at once.
 
 ### Docker
 The image runs the bot as uid 1000, not root. `mcp.json`, `models.json` and `APPEND_SYSTEM.md` go in a directory
-mounted at `/config`, and `DATA_DIR` is `/data`:
+mounted at `/config`, and `DATA_DIR` is `/data`. Leave `DATA_DIR` and `MCP_CONFIG` out of the `.env` the container
+gets, as paths for running outside it would replace these:
 
 ```sh
 docker build -t mattermost-ai-bot .
