@@ -98,7 +98,7 @@ test('a channel post starts a thread only when it mentions the bot', async () =>
   threads.handle(incoming('r2', chat.add('r2', 'u1', '@sailor hello'), { id: 'r2', mentioned: true }));
   await threads.idle();
   assert.deepEqual(chat.replies, [{ channelId: 'c1', rootId: 'r2', message: 'ok' }]);
-  threads.dispose();
+  await threads.close();
 });
 
 test('a direct message starts a thread without a mention', async () => {
@@ -106,7 +106,7 @@ test('a direct message starts a thread without a mention', async () => {
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'hi'), { id: 'r1', direct: true }));
   await threads.idle();
   assert.equal(chat.replies.length, 1);
-  threads.dispose();
+  await threads.close();
 });
 
 test("the bot's own posts and system posts are ignored", async () => {
@@ -115,7 +115,7 @@ test("the bot's own posts and system posts are ignored", async () => {
   threads.handle(incoming('r2', chat.add('r2', 'u1', 'joined'), { id: 'r2', direct: true, type: 'system_join_channel' }));
   await threads.idle();
   assert.equal(sessions.size, 0);
-  threads.dispose();
+  await threads.close();
 });
 
 test('follow-ups in a known thread need no mention and carry only unseen posts', async () => {
@@ -131,7 +131,7 @@ test('follow-ups in a known thread need no mention and carry only unseen posts',
   assert.match(prompts[0]!, /^@maciej \(\d{4}-\d\d-\d\d \d\d:\d\d GMT[+-−]?\d*\): @sailor lights\?$/);
   assert.match(prompts[1]!, /^@guest \(.+\): and the heating\?$/);
   assert.equal(chat.replies.length, 2);
-  threads.dispose();
+  await threads.close();
 });
 
 test('a mention mid-thread hands the agent the whole thread so far', async () => {
@@ -141,7 +141,7 @@ test('a mention mid-thread hands the agent the whole thread so far', async () =>
   threads.handle(incoming('r1', chat.add('r1', 'u1', '@sailor can you check?'), { mentioned: true }));
   await threads.idle();
   assert.equal(sessions.get('r1')!.prompts[0]!.split('\n\n').length, 3);
-  threads.dispose();
+  await threads.close();
 });
 
 test('posts arriving during a run are handed over together afterwards', async () => {
@@ -161,7 +161,7 @@ test('posts arriving during a run are handed over together afterwards', async ()
   const { prompts } = sessions.get('r1')!;
   assert.equal(prompts.length, 2);
   assert.match(prompts[1]!, /second\n\n@guest .*third$/);
-  threads.dispose();
+  await threads.close();
 });
 
 test('tools are allowed only when every author is on the allowlist', async () => {
@@ -171,7 +171,7 @@ test('tools are allowed only when every author is on the allowlist', async () =>
   threads.handle(incoming('r1', chat.add('r1', 'u2', 'lights off')));
   await threads.idle();
   assert.deepEqual(sessions.get('r1')!.allowed, [true, false]);
-  threads.dispose();
+  await threads.close();
 });
 
 test('without an allowlist everyone may use tools', async () => {
@@ -179,7 +179,7 @@ test('without an allowlist everyone may use tools', async () => {
   threads.handle(incoming('r1', chat.add('r1', 'u2', 'search this'), { id: 'r1', direct: true }));
   await threads.idle();
   assert.deepEqual(sessions.get('r1')!.allowed, [true]);
-  threads.dispose();
+  await threads.close();
 });
 
 test('a failed run is reported in the thread', async () => {
@@ -189,7 +189,7 @@ test('a failed run is reported in the thread', async () => {
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'hi'), { id: 'r1', direct: true }));
   await threads.idle();
   assert.deepEqual(chat.replies.map((r) => r.message), ["Sorry, I couldn't finish: rate limited"]);
-  threads.dispose();
+  await threads.close();
 });
 
 test('a scheduled job that comes due is run with tools, and its answer posted to the thread', async () => {
@@ -206,10 +206,10 @@ test('a scheduled job that comes due is run with tools, and its answer posted to
   // Only a run allowed tools could have scheduled it, whoever posted last.
   assert.deepEqual(session.allowed, [true, false, true]);
   assert.deepEqual(chat.replies.at(-1), { channelId: 'c1', rootId: 'r1', message: 'The garage is closed.' });
-  threads.dispose();
+  await threads.close();
 });
 
-test('a thread disposed during a run starts no further runs', async () => {
+test('closing lets the current run finish, then closes the session and takes no more posts', async () => {
   let release!: () => void;
   const first = new Promise<void>((resolve) => (release = resolve));
   const { chat, sessions, threads } = setup(async (prompt) => {
@@ -219,12 +219,16 @@ test('a thread disposed during a run starts no further runs', async () => {
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'first'), { id: 'r1', direct: true }));
   await new Promise((resolve) => setImmediate(resolve));
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'second')));
+  const closed = threads.close();
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'third')));
   const session = sessions.get('r1')!;
-  threads.dispose();
+  assert.equal(session.closed, false);
   release();
-  await new Promise((resolve) => setImmediate(resolve));
+  await closed;
 
   assert.equal(session.prompts.length, 1);
+  assert.deepEqual(chat.replies.map((r) => r.message), ['ok']);
+  assert.equal(session.closed, true);
   // Not reopened, which would leave a session nothing closes.
   assert.equal(sessions.get('r1'), session);
 });
@@ -248,7 +252,7 @@ test('a job that comes due during a run waits for it, and for posts that came in
   assert.match(prompts[1]!, /second$/);
   assert.match(prompts[2]!, /^Scheduled job j1 is due .*: Report$/);
   assert.equal(chat.replies.length, 3);
-  threads.dispose();
+  await threads.close();
 });
 
 test('a thread stays open while its session has scheduled jobs pending', async (t) => {
@@ -268,6 +272,7 @@ test('a thread stays open while its session has scheduled jobs pending', async (
   assert.equal(session.closed, false);
   session.entries.push(snapshot('cancelled'));
   t.mock.timers.tick(60_000);
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(session.closed, true);
-  threads.dispose();
+  await threads.close();
 });

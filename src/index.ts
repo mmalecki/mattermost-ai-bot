@@ -19,11 +19,18 @@ threads = new Threads(agent, mattermost, {
   idleMs: 15 * 60_000,
 });
 
+// Running threads finish their current run first: its posts are already marked seen, so a run cut
+// short would never be answered. A second signal exits at once.
+let stopping = false;
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.once(signal, () => {
-    console.log(`${signal}: shutting down`);
+  process.on(signal, () => {
+    if (stopping) process.exit(1);
+    stopping = true;
+    console.log(`${signal}: shutting down once running threads finish; ${signal} again to exit now`);
     mattermost.close();
-    threads?.dispose();
-    process.exit(0);
+    threads
+      ?.close()
+      .catch((error: unknown) => console.error('Shutdown failed:', error))
+      .finally(() => process.exit(0));
   });
 }

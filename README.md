@@ -86,3 +86,6 @@ npm start
 ```
 
 `npm test` runs the tests, `npm run typecheck` checks types.
+
+On SIGINT or SIGTERM, the bot stops taking posts and exits once running threads finish their current run; a second
+signal exits at once.

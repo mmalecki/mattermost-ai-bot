@@ -52,6 +52,7 @@ export class Threads {
   readonly chat: Chat;
   readonly options: ThreadsOptions;
   readonly #threads = new Map<string, Thread>();
+  #closed = false;
 
   constructor(agent: Agent, chat: Chat, options: ThreadsOptions) {
     this.agent = agent;
@@ -60,7 +61,7 @@ export class Threads {
   }
 
   handle(post: IncomingPost): void {
-    if (post.userId === this.options.botUserId || post.type) return;
+    if (this.#closed || post.userId === this.options.botUserId || post.type) return;
     const rootId = post.rootId || post.id;
     const known = this.#threads.has(rootId) || this.agent.hasSession(rootId);
     if (!known && !post.direct && !post.mentioned) return;
@@ -78,9 +79,12 @@ export class Threads {
     await Promise.all([...this.#threads.values()].map((t) => t.running));
   }
 
-  dispose(): void {
-    for (const thread of this.#threads.values()) thread.dispose();
+  /** Stops taking posts and jobs, lets running threads finish their current run, and closes every session. */
+  async close(): Promise<void> {
+    this.#closed = true;
+    const threads = [...this.#threads.values()];
     this.#threads.clear();
+    await Promise.all(threads.map((t) => t.close()));
   }
 }
 
@@ -88,7 +92,7 @@ class Thread {
   readonly threads: Threads;
   readonly channelId: string;
   readonly rootId: string;
-  readonly onDispose: () => void;
+  readonly onClose: () => void;
   running: Promise<void> | undefined;
   #session: AgentSession | undefined;
   #pending = false;
@@ -97,38 +101,48 @@ class Thread {
   /** Whether everyone the agent is answering may have it call tools. */
   #allowed = false;
   #idleTimer: NodeJS.Timeout | undefined;
-  #disposed = false;
+  #closed = false;
 
-  constructor(threads: Threads, channelId: string, rootId: string, onDispose: () => void) {
+  constructor(threads: Threads, channelId: string, rootId: string, onClose: () => void) {
     this.threads = threads;
     this.channelId = channelId;
     this.rootId = rootId;
-    this.onDispose = onDispose;
+    this.onClose = onClose;
   }
 
   wake(): void {
-    if (this.#disposed) return;
+    if (this.#closed) return;
     this.#pending = true;
     this.#start();
   }
 
   due(job: ScheduledJob): void {
-    if (this.#disposed) return;
+    if (this.#closed) {
+      // The extension has already counted it as run, so it won't come due again.
+      console.warn(`Thread ${this.rootId}: closing, so scheduled job ${job.id} is dropped`);
+      return;
+    }
     this.#jobs.push(job);
     this.#start();
   }
 
-  dispose(): void {
-    this.#disposed = true;
+  /**
+   * Lets the current run finish, then closes the session. Posts that came in meanwhile stay unseen, so
+   * the thread's next run picks them up.
+   */
+  async close(): Promise<void> {
+    this.#closed = true;
     clearTimeout(this.#idleTimer);
-    if (this.#session) void this.threads.agent.closeSession(this.#session);
+    await this.running;
+    const session = this.#session;
     this.#session = undefined;
+    if (session) await this.threads.agent.closeSession(session);
   }
 
   #start(): void {
     this.running ??= this.#run().finally(() => {
       this.running = undefined;
-      if (!this.#disposed) this.#scheduleIdle();
+      if (!this.#closed) this.#scheduleIdle();
     });
   }
 
@@ -138,7 +152,7 @@ class Thread {
     chat.typing(this.channelId, this.rootId);
     const typing = setInterval(() => chat.typing(this.channelId, this.rootId), TYPING_INTERVAL_MS);
     try {
-      while (!this.#disposed && (this.#pending || this.#jobs.length)) {
+      while (!this.#closed && (this.#pending || this.#jobs.length)) {
         const job = this.#pending ? undefined : this.#jobs.shift();
         this.#pending = false;
         try {
@@ -193,8 +207,8 @@ class Thread {
     this.#idleTimer = setTimeout(() => {
       // Scheduled jobs live in the session, so it stays open while it has some.
       if (this.#session && pendingJobs(this.#session.sessionManager.getEntries()).length) return this.#scheduleIdle();
-      this.dispose();
-      this.onDispose();
+      this.onClose();
+      void this.close();
     }, this.threads.options.idleMs);
     this.#idleTimer.unref();
   }
