@@ -4,6 +4,10 @@ import type { Chat, IncomingPost, ThreadPost } from './threads.ts';
 
 /** Mattermost's default MaxPostSize is 16383 characters; leave room for continuation. */
 const MAX_POST_CHARS = 16_000;
+/** Catching up starts this long before the last event, for clock skew; posts already seen are skipped. */
+const CATCH_UP_MARGIN_MS = 60_000;
+/** Older posts aren't caught up on: after a long outage, they're old news. */
+const CATCH_UP_MAX_MS = 24 * 3_600_000;
 
 export class Mattermost implements Chat {
   readonly #client = new Client4();
@@ -15,6 +19,7 @@ export class Mattermost implements Chat {
   botUserId = '';
   /** Set by login(). */
   botUsername = '';
+  #loggedInAt = 0;
 
   constructor(url: string, token: string) {
     this.#url = url;
@@ -27,23 +32,71 @@ export class Mattermost implements Chat {
     const me = await this.#client.getMe();
     this.botUserId = me.id;
     this.botUsername = me.username;
+    this.#loggedInAt = Date.now();
     console.log(`Logged in to ${this.#url} as @${me.username}`);
   }
 
-  /** Starts delivering new posts to `onPost`. */
+  /**
+   * Starts delivering new posts to `onPost`, from those made since login(). Posts made while the
+   * connection was down are delivered once it is back, up to a day's worth. Posts may come more than once.
+   */
   listen(onPost: (post: IncomingPost) => void): void {
+    let lastEventAt = Date.now();
     this.#ws.addMessageListener((msg) => {
+      lastEventAt = Date.now();
       const post = incomingPost(msg, this.botUserId);
       if (post) onPost(post);
     });
-    this.#ws.addFirstConnectListener(() => console.log('WebSocket connected'));
-    this.#ws.addReconnectListener(() => console.log('WebSocket reconnected'));
+    // Having a listener also makes the client resume its connection, so the server replays the events
+    // it missed. This runs when the server can't, after a long outage or a restart of its own.
+    this.#ws.addMissedMessageListener(() => {
+      console.warn('WebSocket missed events the server could not replay');
+      this.#catchUp(lastEventAt, onPost);
+    });
+    // Once the first connection is up, posts made since login(), while the agent was created. It's a
+    // reconnect if connecting failed before.
+    let connected = false;
+    const opened = (how: string) => {
+      console.log(`WebSocket ${how}`);
+      if (connected) return;
+      connected = true;
+      this.#catchUp(this.#loggedInAt, onPost);
+    };
+    this.#ws.addFirstConnectListener(() => opened('connected'));
+    this.#ws.addReconnectListener(() => opened('reconnected'));
     this.#ws.addCloseListener((fails) => console.warn(`WebSocket closed (${fails} failed attempts)`));
     this.#ws.initialize(`${this.#url.replace(/^http/, 'ws')}/api/v4/websocket`, this.#token);
   }
 
   close(): void {
     this.#ws.close();
+  }
+
+  #catchUp(since: number, onPost: (post: IncomingPost) => void): void {
+    const from = Math.max(since - CATCH_UP_MARGIN_MS, Date.now() - CATCH_UP_MAX_MS);
+    this.#postsSince(from).then(
+      (posts) => {
+        console.log(`Caught up on ${posts.length} post(s) since ${new Date(from).toISOString()}`);
+        posts.forEach(onPost);
+      },
+      (error: unknown) => console.error('Catching up on missed posts failed:', error),
+    );
+  }
+
+  /** Posts made since `since` in every channel the bot is in, oldest first. */
+  async #postsSince(since: number): Promise<IncomingPost[]> {
+    const teams = await this.#client.getMyTeams();
+    // Direct and group channels are listed for every team.
+    const channels = new Map((await Promise.all(teams.map((t) => this.#client.getMyChannels(t.id)))).flat().map((c) => [c.id, c]));
+    const posts: Post[] = [];
+    for (const channel of channels.values()) {
+      // Edited posts come too, whenever they were made.
+      const { posts: byId } = await this.#client.getPostsSince(channel.id, since);
+      posts.push(...Object.values(byId).filter((p) => p.create_at > since && !p.delete_at));
+    }
+    return posts
+      .sort((a, b) => a.create_at - b.create_at)
+      .map((p) => toIncoming(p, channels.get(p.channel_id)?.type === 'D', mentions(p.message, this.botUsername)));
   }
 
   async threadPosts(rootId: string): Promise<ThreadPost[]> {
@@ -82,16 +135,21 @@ export function incomingPost(msg: WebSocketMessage, botUserId: string): Incoming
   if ((msg.event as string) !== 'posted') return undefined;
   const { data } = msg as WebSocketMessages.Posted;
   const post = JSON.parse(data.post) as Post;
-  const mentions = data.mentions ? (JSON.parse(data.mentions) as string[]) : [];
-  return {
-    id: post.id,
-    rootId: post.root_id,
-    channelId: post.channel_id,
-    userId: post.user_id,
-    type: post.type,
-    direct: data.channel_type === 'D',
-    mentioned: mentions.includes(botUserId),
-  };
+  const mentioned = data.mentions ? (JSON.parse(data.mentions) as string[]) : [];
+  return toIncoming(post, data.channel_type === 'D', mentioned.includes(botUserId));
+}
+
+function toIncoming(post: Post, direct: boolean, mentioned: boolean): IncomingPost {
+  return { id: post.id, rootId: post.root_id, channelId: post.channel_id, userId: post.user_id, type: post.type, direct, mentioned };
+}
+
+/**
+ * Whether `message` mentions `@username`, for posts fetched without the server's list of mentions. A
+ * `.` ending a sentence doesn't make it another name, but one followed by more of a name does.
+ */
+export function mentions(message: string, username: string): boolean {
+  const escaped = username.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
+  return new RegExp(`(?<![\\w@.-])@${escaped}(?![\\w-]|\\.[\\w-])`, 'i').test(message);
 }
 
 /** Splits at paragraph, then line, then hard boundaries, keeping each part under `max`. */
