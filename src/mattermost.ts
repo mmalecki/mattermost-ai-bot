@@ -9,25 +9,29 @@ export class Mattermost implements Chat {
   readonly #client = new Client4();
   readonly #ws = new WebSocketClient();
   readonly #usernames = new Map<string, Promise<string>>();
-  readonly url: string;
-  readonly token: string;
+  readonly #url: string;
+  readonly #token: string;
+  /** Set by login(). */
   botUserId = '';
+  /** Set by login(). */
   botUsername = '';
 
   constructor(url: string, token: string) {
-    this.url = url;
-    this.token = token;
+    this.#url = url;
+    this.#token = token;
     this.#client.setUrl(url);
     this.#client.setToken(token);
   }
 
-  /** Logs in and starts delivering new posts to `onPost`. */
-  async connect(onPost: (post: IncomingPost) => void): Promise<void> {
+  async login(): Promise<void> {
     const me = await this.#client.getMe();
     this.botUserId = me.id;
     this.botUsername = me.username;
-    console.log(`Logged in to ${this.url} as @${me.username}`);
+    console.log(`Logged in to ${this.#url} as @${me.username}`);
+  }
 
+  /** Starts delivering new posts to `onPost`. */
+  listen(onPost: (post: IncomingPost) => void): void {
     this.#ws.addMessageListener((msg) => {
       const post = incomingPost(msg, this.botUserId);
       if (post) onPost(post);
@@ -35,7 +39,7 @@ export class Mattermost implements Chat {
     this.#ws.addFirstConnectListener(() => console.log('WebSocket connected'));
     this.#ws.addReconnectListener(() => console.log('WebSocket reconnected'));
     this.#ws.addCloseListener((fails) => console.warn(`WebSocket closed (${fails} failed attempts)`));
-    this.#ws.initialize(`${this.url.replace(/^http/, 'ws')}/api/v4/websocket`, this.token);
+    this.#ws.initialize(`${this.#url.replace(/^http/, 'ws')}/api/v4/websocket`, this.#token);
   }
 
   close(): void {

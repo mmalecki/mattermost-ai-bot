@@ -9,15 +9,14 @@ console.log(`MCP servers: ${servers.join(', ') || '(none)'}`);
 if (servers.length && !config.tools.allowedUsers) console.warn('No allowedUsers in the MCP config: everyone can use every tool');
 
 const mattermost = new Mattermost(config.mattermost.url, config.mattermost.token);
-let threads: Threads | undefined;
-
-await mattermost.connect((post) => threads?.handle(post));
+await mattermost.login();
 const agent = await createAgent(config, mattermost.botUsername);
-threads = new Threads(agent, mattermost, {
+const threads = new Threads(agent, mattermost, {
   botUserId: mattermost.botUserId,
   allowedUsers: config.tools.allowedUsers,
   idleMs: 15 * 60_000,
 });
+mattermost.listen((post) => threads.handle(post));
 
 // Running threads finish their current run first: its posts are already marked seen, so a run cut
 // short would never be answered. A second signal exits at once.
@@ -29,7 +28,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     console.log(`${signal}: shutting down once running threads finish; ${signal} again to exit now`);
     mattermost.close();
     threads
-      ?.close()
+      .close()
       .catch((error: unknown) => console.error('Shutdown failed:', error))
       .finally(() => process.exit(0));
   });
