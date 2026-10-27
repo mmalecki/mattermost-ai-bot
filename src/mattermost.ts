@@ -44,6 +44,9 @@ export class Mattermost implements Chat {
     let lastEventAt = Date.now();
     this.#ws.addMessageListener((msg) => {
       lastEventAt = Date.now();
+      // Allowlists name users, so a rename has to reach the cache.
+      const user = updatedUser(msg);
+      if (user && this.#usernames.has(user.id)) this.#usernames.set(user.id, Promise.resolve(user.username));
       const post = incomingPost(msg, this.botUserId);
       if (post) onPost(post);
     });
@@ -51,6 +54,8 @@ export class Mattermost implements Chat {
     // it missed. This runs when the server can't, after a long outage or a restart of its own.
     this.#ws.addMissedMessageListener(() => {
       console.warn('WebSocket missed events the server could not replay');
+      // Any user_updated among them too.
+      this.#usernames.clear();
       this.#catchUp(lastEventAt, onPost);
     });
     // Once the first connection is up, posts made since login(), while the agent was created. It's a
@@ -137,6 +142,12 @@ export function incomingPost(msg: WebSocketMessage, botUserId: string): Incoming
   const post = JSON.parse(data.post) as Post;
   const mentioned = data.mentions ? (JSON.parse(data.mentions) as string[]) : [];
   return toIncoming(post, data.channel_type === 'D', mentioned.includes(botUserId));
+}
+
+export function updatedUser(msg: WebSocketMessage): { id: string; username: string } | undefined {
+  if ((msg.event as string) !== 'user_updated') return undefined;
+  const { user } = (msg as WebSocketMessages.UserUpdated).data;
+  return { id: user.id, username: user.username };
 }
 
 function toIncoming(post: Post, direct: boolean, mentioned: boolean): IncomingPost {

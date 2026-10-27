@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WebSocketMessage } from '@mattermost/client';
-import { incomingPost, mentions, splitMessage } from '../src/mattermost.ts';
+import { incomingPost, mentions, splitMessage, updatedUser } from '../src/mattermost.ts';
 
 function posted(post: object, data: object = {}): WebSocketMessage {
   return {
@@ -34,6 +34,12 @@ test('direct channels are marked, mentions of others are not ours', () => {
 
 test('other events are ignored', () => {
   assert.equal(incomingPost({ event: 'typing', data: {} } as unknown as WebSocketMessage, 'bot'), undefined);
+});
+
+test('user updates give the new username', () => {
+  const msg = { event: 'user_updated', data: { user: { id: 'u1', username: 'alice2', email: '' } }, seq: 1 } as unknown as WebSocketMessage;
+  assert.deepEqual(updatedUser(msg), { id: 'u1', username: 'alice2' });
+  assert.equal(updatedUser(posted({ id: 'p1' })), undefined);
 });
 
 test('finds mentions of the bot in fetched posts, as Mattermost does', () => {
