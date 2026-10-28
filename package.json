@@ -15,7 +15,6 @@
     "self-hosted",
     "pi"
   ],
-  "private": true,
   "type": "module",
   "license": "MIT",
   "author": "Maciej Małecki <me@mmalecki.com>",
