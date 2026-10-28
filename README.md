@@ -1,5 +1,5 @@
 # mattermost-ai-bot
-An AI bot for Mattermost. Responds in threads and DMs, and runs in an agentic loop (powered by [Pi](TBD)).
+An AI bot for Mattermost. Responds in threads and DMs, and runs in an agentic loop (powered by [Pi](https://pi.dev)).
 
 ![Mattermost thread with the bot executing "party lights" prompt](./docs/thread.png)
 
@@ -8,7 +8,7 @@ A less full-featured alternative to [Mattermost Agents plugin](https://github.co
 ## Configuration
 Set in `.env`:
 
-* `MATTERMOST_URL`, `MATTERMOST_TOKEN` - Mattermost server and [bot token](TBD: docs)
+* `MATTERMOST_URL`, `MATTERMOST_TOKEN` - Mattermost server and [bot token](https://developers.mattermost.com/integrate/reference/bot-accounts/)
 * `MODEL` - the model, as `provider/model[:thinking]` like Pi's `--model`, for example
   `mistral/mistral-small-2603` or `anthropic/claude-haiku-5-5:low`. 
   [Pi handles provider and model quirks](https://pi.dev/docs/latest/providers).
@@ -16,7 +16,7 @@ Set in `.env`:
 * The provider's API key, under Pi's [name for it](https://pi.dev/docs/latest/providers#use-an-api-key-from-the-environment) (for example: `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `MISTRAL_API_KEY`, ...)
 * `MAX_OUTPUT_TOKENS` - default 8192, or the model's own limit if lower. It includes reasoning, and keeps a model
   stuck repeating itself from running for long
-* `PARALLEL_API_KEY` - enables `websearch` through [Parallel](TBD)
+* `PARALLEL_API_KEY` - enables `websearch` through [Parallel](https://parallel.ai)
 * `MCP_CONFIG` - path to the tools configuration, below. Default `./mcp.json`, which may be missing
 * `DATA_DIR` - default `./data`
 * `SCHEDULER` - `true` lets the agent schedule jobs in a thread, once or repeatedly, with
@@ -86,10 +86,10 @@ minute for a recurring one, and a thread can have 10 jobs.
 ### npm
 
 ```sh
-npm install -g TBD
+npm install -g @mmalecki/mattermost-ai-bot
 
 # or:
-npx TBD
+npx @mmalecki/mattermost-ai-bot
 ```
 
 ### Docker
@@ -97,7 +97,7 @@ npx TBD
 docker run -d --name mattermost-ai-bot \
   --restart=unless-stopped \
   --env-file .env -v "$PWD/config:/config:ro" -v mattermost-ai-bot:/data \
-  TBD
+  ghcr.io/mmalecki/mattermost-ai-bot
 ```
 
 The image runs the bot as uid 1000, not root. `mcp.json`, `models.json` and `APPEND_SYSTEM.md` go in a directory
@@ -111,11 +111,12 @@ docker run -d --name mattermost-ai-bot --env-file .env -v "$PWD/config:/config:r
 
 `/data` must be writable by uid 1000 in the container. A named volume, as above, is. A host directory isn't under
 rootless Docker or Podman, where the container's uids map to subordinate ones: hand it over with
-`docker run --rm --user root -v "$PWD/data:/data" mattermost-ai-bot chown 1000:1000 /data`.
+`docker run --rm --user root -v "$PWD/data:/data" ghcr.io/mmalecki/mattermost-ai-bot chown 1000:1000 /data`.
 
 ### From source
 ```sh
-git clone TBD
+git clone https://github.com/mmalecki/mattermost-ai-bot.git
+cd mattermost-ai-bot
 npm install
 npm start
 ```
