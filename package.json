@@ -1,6 +1,6 @@
 {
   "name": "@mmalecki/mattermost-ai-bot",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI bot for Mattermost: an LLM agent that takes part in your threads and gets things done with tools, from web research to MCP servers",
   "keywords": [
     "mattermost",
