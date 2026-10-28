@@ -185,7 +185,10 @@ class Thread {
     const last = posts.at(-1);
     if (!last) return;
 
-    const names = await Promise.all(posts.map((p) => chat.username(p.userId)));
+    // A post's author may be one no longer looked up, deleted since: the id stands in for the
+    // name, and #mayUseTools turns tools off for them instead. Answering must not fail: that
+    // would leave the posts unseen and retried, and reported, forever.
+    const names = await Promise.all(posts.map((p) => chat.username(p.userId).catch(() => p.userId)));
     this.#allowed = await this.#mayUseTools(session, thread);
     // Recorded first, so a failing run doesn't send the same posts again.
     const seen: SeenEntry = { createAt: last.createAt, userIds: [...new Set(posts.map((p) => p.userId))] };
