@@ -227,6 +227,22 @@ test("an author who can't be looked up any more turns tools off, and the thread 
   await threads.close();
 });
 
+test("a post whose author can't be looked up any more is answered by id, not retried forever", async () => {
+  const { chat, sessions, threads } = setup(undefined, ['maciej']);
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'hi'), { id: 'r1', direct: true }));
+  await threads.idle();
+
+  chat.gone.add('u2');
+  threads.handle(incoming('r1', chat.add('r1', 'u2', 'and the heating?')));
+  await threads.idle();
+
+  // Answered, not failed and retried on every later post; tools off, as #mayUseTools says.
+  assert.deepEqual(chat.replies.map((r) => r.message), ['ok', 'ok']);
+  assert.deepEqual(sessions.get('r1')!.allowed, [true, false]);
+  assert.match(sessions.get('r1')!.prompts[1]!, /^@u2 \(.+\): and the heating\?$/);
+  await threads.close();
+});
+
 test('without an allowlist everyone may use tools', async () => {
   const { chat, sessions, threads } = setup(undefined, null);
   threads.handle(incoming('r1', chat.add('r1', 'u2', 'search this'), { id: 'r1', direct: true }));
