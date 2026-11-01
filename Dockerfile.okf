@@ -1,0 +1,9 @@
+# The bot's image, from Dockerfile, with okf-agent-memory added for its MCP server: `okf mcp <bundle>`.
+ARG BASE=ghcr.io/mmalecki/mattermost-ai-bot:latest
+
+FROM golang:1.26-alpine AS okf
+ARG OKF_VERSION=v0.7.2
+RUN CGO_ENABLED=0 GOBIN=/out go install -trimpath -ldflags="-s -w" github.com/okf-memory/okf-agent-memory/cmd/okf@${OKF_VERSION}
+
+FROM ${BASE}
+COPY --from=okf /out/okf /usr/local/bin/okf
