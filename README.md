@@ -113,6 +113,27 @@ docker run -d --name mattermost-ai-bot --env-file .env -v "$PWD/config:/config:r
 rootless Docker or Podman, where the container's uids map to subordinate ones: hand it over with
 `docker run --rm --user root -v "$PWD/data:/data" ghcr.io/mmalecki/mattermost-ai-bot chown 1000:1000 /data`.
 
+### Docker Compose
+`docker compose up -d` builds and runs the bot as above. `docker-compose.tools.yml` adds
+[Artifact Server](https://github.com/plannotator/artifact-server) next to it, as its
+[Compact Compose package](https://github.com/plannotator/artifact-server/blob/main/packaging/compose/README.md): SQLite
+and file storage in one `artifact-server` volume, served on `127.0.0.1:8787`. That README covers what it needs around
+it: a TLS reverse proxy for the application origin and a separate wildcard content domain, and exactly one identity
+provider, WorkOS or OIDC. Its settings go in `.env`, as in its
+[`.env.example`](https://github.com/plannotator/artifact-server/blob/main/packaging/compose/.env.example);
+`ARTIFACT_SERVER_ORIGIN` and `ARTIFACT_SERVER_CONTENT_DOMAIN` are required, and `ARTIFACT_SERVER_IMAGE` defaults to
+a pinned release. The bot gets the whole `.env` too, secrets for Artifact Server included.
+
+Initialize the volume once, then start both:
+
+```sh
+docker compose -f docker-compose.tools.yml run --rm --no-deps artifact-server \
+  init --admin-email admin@example.com --data /var/lib/artifact-server/data
+docker compose -f docker-compose.tools.yml up -d --wait
+```
+
+Artifact Server's `compact-backup.sh` and `compact-restore.sh` expect its own Compose package, not this file.
+
 ### From source
 ```sh
 git clone https://github.com/mmalecki/mattermost-ai-bot.git
