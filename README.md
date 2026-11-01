@@ -121,8 +121,8 @@ and file storage in one `artifact-server` volume, served on `127.0.0.1:8787`. Th
 it: a TLS reverse proxy for the application origin and a separate wildcard content domain, and exactly one identity
 provider, WorkOS or OIDC. Its settings go in `.env`, as in its
 [`.env.example`](https://github.com/plannotator/artifact-server/blob/main/packaging/compose/.env.example);
-`ARTIFACT_SERVER_ORIGIN` and `ARTIFACT_SERVER_CONTENT_DOMAIN` are required, and `ARTIFACT_SERVER_IMAGE` defaults to
-a pinned release. The bot gets the whole `.env` too, secrets for Artifact Server included.
+`ARTIFACT_SERVER_ORIGIN` and `ARTIFACT_SERVER_CONTENT_DOMAIN` are required. `ARTIFACT_SERVER_IMAGE` defaults to a
+pinned release, so leave out that file's placeholder for it. The bot gets the whole `.env` too, secrets for Artifact Server included.
 
 Initialize the volume once, then start both:
 
