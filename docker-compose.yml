@@ -1,0 +1,14 @@
+services:
+  mattermost-ai-bot:
+    build: .
+    image: mattermost-ai-bot
+    container_name: mattermost-ai-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./config:/config:ro
+      - mattermost-ai-bot:/data
+
+volumes:
+  mattermost-ai-bot:
+    name: mattermost-ai-bot
