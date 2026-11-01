@@ -11,4 +11,3 @@ services:
 
 volumes:
   mattermost-ai-bot:
-    name: mattermost-ai-bot
