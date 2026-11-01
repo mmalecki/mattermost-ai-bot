@@ -60,4 +60,3 @@ services:
 
 volumes:
   artifact-server:
-    name: artifact-server
