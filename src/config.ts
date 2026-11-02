@@ -18,6 +18,8 @@ export interface Config {
   tools: ToolsConfig;
   /** Whether the agent can schedule jobs in its threads, with pi-ate-scheduler. */
   scheduler: boolean;
+  /** Whether the agent always has `codemode`, not only with servers of `codemode` exposure. */
+  codemode: boolean;
   /** Operator instructions added to the system prompt, used when the file exists. */
   appendSystemPromptPath: string;
   /** Thread sessions and pi's own state live here. */
@@ -65,6 +67,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // A missing default file means no MCP servers; a missing file that was asked for is an error.
     tools: loadTools(mcpConfig, !!env.MCP_CONFIG),
     scheduler: flag('SCHEDULER'),
+    codemode: flag('CODEMODE'),
     // pi's name for instructions added to its system prompt, kept next to the tools they're about.
     appendSystemPromptPath: join(dirname(mcpConfig), 'APPEND_SYSTEM.md'),
     dataDir: resolve(env.DATA_DIR || 'data'),

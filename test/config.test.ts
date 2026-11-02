@@ -46,6 +46,15 @@ test('SCHEDULER is off unless set to true or 1', () => {
   assert.throws(() => loadConfig({ ...env, SCHEDULER: 'yes' }), /SCHEDULER must be true or false/);
 });
 
+test('CODEMODE is off unless set to true or 1', () => {
+  const env = base;
+  assert.equal(loadConfig(env).codemode, false);
+  assert.equal(loadConfig({ ...env, CODEMODE: 'true' }).codemode, true);
+  assert.equal(loadConfig({ ...env, CODEMODE: '1' }).codemode, true);
+  assert.equal(loadConfig({ ...env, CODEMODE: '0' }).codemode, false);
+  assert.throws(() => loadConfig({ ...env, CODEMODE: 'yes' }), /CODEMODE must be true or false/);
+});
+
 test('MCP_CONFIG must exist when set; the default mcp.json may be missing', () => {
   const dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-'));
   const env = { ...base, MCP_CONFIG: join(dir, 'missing.json') };

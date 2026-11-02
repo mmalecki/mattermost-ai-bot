@@ -23,6 +23,8 @@ Set in `.env`:
 * `DATA_DIR` - default `./data`
 * `SCHEDULER` - `true` lets the agent schedule jobs in a thread, once or repeatedly, with
   [pi-ate-scheduler](https://github.com/catlain/pi-scheduler). Default `false`. See below
+* `CODEMODE` - `true` gives the agent [Pi's `codemode`](https://pi.dev/docs/latest/codemode) tool even when every MCP
+  server has `direct` exposure. Default `false`. See below
 * `TZ` - time zone the posts' times are given to the model in, with their UTC offset. Default: the system's
 
 Endpoints Pi doesn't know, such as a local llama.cpp server, go in `models.json` next to `mcp.json`, in
@@ -80,7 +82,9 @@ deleted later, turns them off in that thread, scheduled jobs included. Without `
 
 Values such as `${HASS_TOKEN}` are read from the environment, so secrets can stay in `.env`. As in Pi, a server's
 `exposure` defaults to `codemode`, where the model reaches its tools through scripts; `direct` declares them to the model
-like the built-in tools, which suits small models and small servers best. The `description` of every enabled server is
+like the built-in tools, which suits small models and small servers best. `codemode` is on only while some server has
+`codemode` exposure, unless `CODEMODE=true`: then scripts can call every tool, `direct` ones and the built-in web tools
+included, to run calls in parallel or cut down large results. The `description` of every enabled server is
 shown to the model, whatever its exposure. `mcp.example.json` is a starting point.
 
 ### Scheduled jobs

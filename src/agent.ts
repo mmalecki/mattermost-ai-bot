@@ -114,6 +114,8 @@ export async function createAgent(config: Config, botUsername: string): Promise<
         resourceLoader,
         // No file or shell access: the bot only gets the extensions' tools.
         noTools: 'builtin',
+        // pi ignores its `defaultTools` setting under `noTools`, but still applies `+name` entries here.
+        ...(config.codemode ? { tools: ['+codemode'] } : {}),
         // pi's readers for MCP resources, declared even for servers without any.
         excludeTools: ['list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'],
         sessionManager: SessionManager.open(sessionFile(rootId), sessionDir, config.dataDir),
