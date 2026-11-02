@@ -98,7 +98,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
         noPromptTemplates: true,
         noThemes: true,
         noContextFiles: true,
-        systemPrompt: buildSystemPrompt(botUsername, config.tools.mcpServers, !!schedulerExtension, config.mattermost.publicUrl, rootId),
+        systemPrompt: buildSystemPrompt(botUsername, config.tools.mcpServers, !!schedulerExtension, images, config.mattermost.publicUrl, rootId),
         // Read on every session open, so edits reach new threads. pi would take a missing path as
         // the text itself, and would look for its own APPEND_SYSTEM.md without an explicit list.
         appendSystemPrompt: existsSync(config.appendSystemPromptPath) ? [config.appendSystemPromptPath] : [],
@@ -136,12 +136,22 @@ export async function createAgent(config: Config, botUsername: string): Promise<
   };
 }
 
-/** `serverUrl` and `rootId` give the model the thread's permalink, and how to link its posts. */
-export function buildSystemPrompt(botUsername: string, servers: Record<string, McpServerConfig>, scheduler: boolean, serverUrl: string, rootId: string): string {
+/**
+ * `images` is whether the model takes them. `serverUrl` and `rootId` give the model the thread's
+ * permalink, and how to link its posts.
+ */
+export function buildSystemPrompt(
+  botUsername: string,
+  servers: Record<string, McpServerConfig>,
+  scheduler: boolean,
+  images: boolean,
+  serverUrl: string,
+  rootId: string,
+): string {
   return [
     `You are @${botUsername}, a Mattermost bot that gets things done with your tools.`,
     'Each user message holds one or more Mattermost posts from a thread, as "@username (time, post <id>): text". Several people can take part in one thread.',
-    'The files attached to a post are listed after its text. Images you can see are "[image <n>: name]", and come at the end of the message, in that order.',
+    `The files attached to a post are listed after its text.${images ? ' Images you can see are "[image <n>: name]", and come at the end of the message, in that order.' : ''}`,
     `This thread's link is ${permalink(serverUrl, rootId)}, and a post's is ${permalink(serverUrl, '<id>')}: use them to point to the thread or a post in it.`,
     'Your reply is posted to the thread as Mattermost markdown.',
     'What you change happens in the real world. Look before you change anything: get the current state first, and only change things in a later step, once you have seen it. Never send a change in the same batch as the look.',
