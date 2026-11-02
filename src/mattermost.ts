@@ -94,12 +94,15 @@ export class Mattermost implements Chat {
     const teams = await this.#client.getMyTeams();
     // Direct and group channels are listed for every team.
     const channels = new Map((await Promise.all(teams.map((t) => this.#client.getMyChannels(t.id)))).flat().map((c) => [c.id, c]));
-    const posts: Post[] = [];
-    for (const channel of channels.values()) {
-      // Edited posts come too, whenever they were made.
-      const { posts: byId } = await this.#client.getPostsSince(channel.id, since);
-      posts.push(...Object.values(byId).filter((p) => p.create_at > since && !p.delete_at));
-    }
+    // Edited posts come too, whenever they were made. Promise.all keeps the channels' order.
+    const posts = (
+      await Promise.all(
+        [...channels.values()].map(async (channel) => {
+          const { posts: byId } = await this.#client.getPostsSince(channel.id, since);
+          return Object.values(byId).filter((p) => p.create_at > since && !p.delete_at);
+        }),
+      )
+    ).flat();
     return posts
       .sort((a, b) => a.create_at - b.create_at)
       .map((p) => toIncoming(p, channels.get(p.channel_id)?.type === 'D', mentions(p.message, this.botUsername)));
