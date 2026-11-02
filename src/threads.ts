@@ -213,7 +213,7 @@ class Thread {
     // name, and #allowTools turns tools off for them instead. Answering must not fail: that
     // would leave the posts unseen and retried, and reported, forever.
     const names = await Promise.all(posts.map((p) => chat.username(p.userId).catch(() => p.userId)));
-    await this.#allowTools(seen, thread.map((p) => p.userId));
+    await this.#allowTools(seen, posts.map((p) => p.userId));
     // Recorded first, so a failing run doesn't send the same posts again.
     const entry: SeenEntry = { createAt: last.createAt, userIds: [...new Set(posts.map((p) => p.userId))] };
     session.sessionManager.appendCustomEntry(SEEN_ENTRY, entry);
@@ -264,9 +264,9 @@ class Thread {
 
   /**
    * Sets #allowed for this run: whether everyone the agent has seen a post from may have it call tools,
-   * so a single post from anyone else turns them off. `userIds` are the thread's authors beyond the
-   * session's; its recorded ones count too, deleted posts' included, as the agent has seen what they
-   * wrote. An author who can no longer be looked up isn't allowed.
+   * so a single post from anyone else turns them off. `userIds` are this run's new posts' authors; the
+   * session's recorded ones count too, deleted posts' included, as the agent has seen what they wrote.
+   * An author who can no longer be looked up isn't allowed.
    */
   async #allowTools(seen: Seen, userIds: Iterable<string>): Promise<void> {
     const { chat, options } = this.threads;
