@@ -203,19 +203,20 @@ class Thread {
 
   async #answerPosts(session: AgentSession): Promise<void> {
     const { chat } = this.threads;
+    const seen = seenPosts(session);
     const thread = await chat.threadPosts(this.rootId);
-    const posts = thread.filter((p) => p.createAt > seenPosts(session).createAt);
+    const posts = thread.filter((p) => p.createAt > seen.createAt);
     const last = posts.at(-1);
     if (!last) return;
 
     // A post's author may be one no longer looked up, deleted since: the id stands in for the
-    // name, and #mayUseTools turns tools off for them instead. Answering must not fail: that
+    // name, and #allowTools turns tools off for them instead. Answering must not fail: that
     // would leave the posts unseen and retried, and reported, forever.
     const names = await Promise.all(posts.map((p) => chat.username(p.userId).catch(() => p.userId)));
-    this.#allowed = await this.#mayUseTools(session, thread);
+    await this.#allowTools(seen, thread.map((p) => p.userId));
     // Recorded first, so a failing run doesn't send the same posts again.
-    const seen: SeenEntry = { createAt: last.createAt, userIds: [...new Set(posts.map((p) => p.userId))] };
-    session.sessionManager.appendCustomEntry(SEEN_ENTRY, seen);
+    const entry: SeenEntry = { createAt: last.createAt, userIds: [...new Set(posts.map((p) => p.userId))] };
+    session.sessionManager.appendCustomEntry(SEEN_ENTRY, entry);
 
     console.log(`Thread ${this.rootId}: ${posts.length} new post(s) from ${[...new Set(names)].join(', ')}`);
     const { lines, images } = await this.#attachments(posts);
@@ -255,23 +256,28 @@ class Thread {
   }
 
   async #runJob(session: AgentSession, job: ScheduledJob): Promise<void> {
-    this.#allowed = await this.#mayUseTools(session, await this.threads.chat.threadPosts(this.rootId));
+    // No thread fetch: posts are answered before jobs in a run, so their authors are in the session.
+    await this.#allowTools(seenPosts(session), []);
     console.log(`Thread ${this.rootId}: scheduled job ${job.id} is due`);
     await this.#answer(session, formatJob(job, Date.now()));
   }
 
   /**
-   * Whether everyone who has posted in the thread may have the agent call tools, so a single post from
-   * anyone else turns them off. Authors of deleted posts count too, from the session, as the agent has
-   * seen what they wrote, and an author who can no longer be looked up isn't allowed.
+   * Sets #allowed for this run: whether everyone the agent has seen a post from may have it call tools,
+   * so a single post from anyone else turns them off. `userIds` are the thread's authors beyond the
+   * session's; its recorded ones count too, deleted posts' included, as the agent has seen what they
+   * wrote. An author who can no longer be looked up isn't allowed.
    */
-  async #mayUseTools(session: AgentSession, thread: ThreadPost[]): Promise<boolean> {
+  async #allowTools(seen: Seen, userIds: Iterable<string>): Promise<void> {
     const { chat, options } = this.threads;
     const { allowedUsers } = options;
-    if (!allowedUsers) return true;
-    const userIds = new Set([...seenPosts(session).userIds, ...thread.map((p) => p.userId)]);
-    const names = await Promise.all([...userIds].map((id) => chat.username(id).catch(() => undefined)));
-    return names.every((name) => name !== undefined && allowedUsers.has(name));
+    if (!allowedUsers) {
+      this.#allowed = true;
+      return;
+    }
+    const ids = new Set([...seen.userIds, ...userIds]);
+    const names = await Promise.all([...ids].map((id) => chat.username(id).catch(() => undefined)));
+    this.#allowed = names.every((name) => name !== undefined && allowedUsers.has(name));
   }
 
   async #answer(session: AgentSession, prompt: string, images: ImageContent[] = []): Promise<void> {
@@ -296,8 +302,13 @@ class Thread {
   }
 }
 
-/** The posts handed to the agent so far: up to which one, and by whom. */
-function seenPosts(session: AgentSession): { createAt: number; userIds: Set<string> } {
+/** The posts handed to the agent so far, as seenPosts() reads them back. */
+interface Seen {
+  createAt: number;
+  userIds: Set<string>;
+}
+
+function seenPosts(session: AgentSession): Seen {
   let createAt = 0;
   const userIds = new Set<string>();
   for (const entry of session.sessionManager.getEntries()) {
