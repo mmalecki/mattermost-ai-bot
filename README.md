@@ -46,6 +46,9 @@ with `MODEL=local/qwen3.6-35b`.
 identity, purpose, for example "You are Sailor, you look after our home through Home Assistant".
 Refreshed live for new sessions, and after a session idles out for existing ones.
 
+The agent also gets the thread's permalink, and each post's id, so it can link the thread or a post in it, for
+example in a note it saves somewhere with a tool. Links take the `MATTERMOST_URL/_redirect/pl/<post id>` form.
+
 ### Tools
 `mcp.json` uses [Pi's MCP configuration format](https://pi.dev/docs/latest/mcp), with one addition: `allowedUsers`, the
 Mattermost users who may have the agent call tools. It covers every tool call, the built-in web tools included, and
