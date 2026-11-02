@@ -1,9 +1,45 @@
-# The bot's image, from Dockerfile, with okf-agent-memory added for its MCP server: `okf mcp <bundle>`.
+# syntax=docker/dockerfile:1
+
+# The bot's image, from Dockerfile, with tools added for its MCP servers:
+# - okf-agent-memory: `okf mcp <bundle>`
+# - webdav-mcp: `webdav-mcp`, configured by WEBDAV_URL, WEBDAV_USER and WEBDAV_PASS
 ARG BASE=ghcr.io/mmalecki/mattermost-ai-bot:latest
 
 FROM golang:1.26-alpine AS okf
 ARG OKF_VERSION=v0.7.2
 RUN CGO_ENABLED=0 GOBIN=/out go install -trimpath -ldflags="-s -w" github.com/okf-memory/okf-agent-memory/cmd/okf@${OKF_VERSION}
 
+# As webdav-mcp's own Dockerfile: Zig runs on the build host and cross-compiles a static musl binary for the target.
+FROM --platform=$BUILDPLATFORM alpine:3.22 AS webdav-mcp
+ARG WEBDAV_MCP_REF=docker
+ARG ZIG_VERSION=0.16.0
+ARG BUILDARCH
+ARG TARGETARCH
+RUN apk add --no-cache ca-certificates curl xz
+RUN set -eux; \
+    case "$BUILDARCH" in \
+      amd64) zig_arch=x86_64;  zig_sha=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00 ;; \
+      arm64) zig_arch=aarch64; zig_sha=ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17 ;; \
+      *) echo "unsupported build arch: $BUILDARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/zig.tar.xz "https://ziglang.org/download/${ZIG_VERSION}/zig-${zig_arch}-linux-${ZIG_VERSION}.tar.xz"; \
+    echo "${zig_sha}  /tmp/zig.tar.xz" | sha256sum -c -; \
+    mkdir -p /opt/zig; \
+    tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1; \
+    rm /tmp/zig.tar.xz; \
+    ln -s /opt/zig/zig /usr/local/bin/zig
+ADD https://github.com/mmalecki/webdav-mcp.git#${WEBDAV_MCP_REF} /src
+WORKDIR /src
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64)   triple=x86_64-linux-musl ;; \
+      arm64)   triple=aarch64-linux-musl ;; \
+      arm)     triple=arm-linux-musleabihf ;; \
+      riscv64) triple=riscv64-linux-musl ;; \
+      *) echo "unsupported target arch: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    zig build -Dtarget="$triple" -Doptimize=ReleaseSmall
+
 FROM ${BASE}
 COPY --from=okf /out/okf /usr/local/bin/okf
+COPY --from=webdav-mcp /src/zig-out/bin/webdav-mcp /usr/local/bin/webdav-mcp
