@@ -4,7 +4,7 @@ import type { Agent } from './agent.ts';
 import type { ModelChoice } from './config.ts';
 import { errorMessage } from './error.ts';
 import { pendingJobs, type ScheduledJob } from './scheduler.ts';
-import type { GeneratedImage } from './tools.ts';
+import type { ImageStore } from './tools.ts';
 
 export interface ThreadPost {
   id: string;
@@ -40,8 +40,11 @@ export interface Chat {
   /** A file's contents, or with `preview`, the server's smaller JPEG of an image. */
   file(fileId: string, preview: boolean): Promise<Uint8Array>;
   username(userId: string): Promise<string>;
-  /** Posts `message`, which may be empty when there are files, with `files` attached. */
-  reply(channelId: string, rootId: string, message: string, files?: OutgoingFile[]): Promise<void>;
+  /**
+   * Posts `message`, which may be empty when there are files, with `files` attached. Returns their ids, in
+   * order, with undefined for one that couldn't be attached.
+   */
+  reply(channelId: string, rootId: string, message: string, files?: OutgoingFile[]): Promise<(string | undefined)[]>;
   typing(channelId: string, rootId: string): void;
 }
 
@@ -75,6 +78,18 @@ interface SeenEntry {
   /** The posts' authors. */
   userIds: string[];
 }
+
+/** Session entry recording an image the agent generated, under its name. Not part of the model's context. */
+const GENERATED_ENTRY = 'generated-image';
+
+interface GeneratedEntry {
+  name: string;
+  mimeType: string;
+  /** Recorded again with this once the image is posted. */
+  fileId?: string;
+}
+
+const IMAGE_EXTENSIONS: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
 const TYPING_INTERVAL_MS = 3_000;
 /** Images handed to the agent with one batch of posts; any more are only named. */
 const MAX_IMAGES = 8;
@@ -143,8 +158,9 @@ class Thread {
   #pending = false;
   /** Scheduled jobs that came due, run after any new posts. */
   readonly #jobs: ScheduledJob[] = [];
-  /** Images the agent generated in the current run, posted with its reply. */
-  readonly #generated: GeneratedImage[] = [];
+  /** Images the agent generated in the current run, as the image model returned them, posted with its reply. */
+  readonly #generated: { name: string; image: ImageContent }[] = [];
+  readonly #imageStore: ImageStore = { add: (image) => this.#addImage(image), get: (refs) => this.#images(refs) };
   /** Whether the current run may call tools. */
   #allowed = false;
   #idleTimer: NodeJS.Timeout | undefined;
@@ -221,7 +237,7 @@ class Thread {
       model,
       allowTools: () => this.#allowed,
       onScheduled: (due) => this.due(due),
-      onImage: (image) => this.#generated.push(image),
+      imageStore: this.#imageStore,
     }));
   }
 
@@ -282,31 +298,80 @@ class Thread {
    * fail on it.
    */
   async #attachments(posts: ThreadPost[], takesImages: boolean): Promise<{ lines: string[][]; images: ImageContent[] }> {
+    const { agent } = this.threads;
     const images: ImageContent[] = [];
     const lines: string[][] = [];
     for (const post of posts) {
       const postLines: string[] = [];
       for (const file of post.files) {
-        postLines.push(takesImages && file.mimeType.startsWith('image/') ? await this.#image(file, images) : fileLine(file));
+        const image = file.mimeType.startsWith('image/');
+        if (image && takesImages) postLines.push(await this.#image(file, images));
+        // The model can't see it, but can still have it changed.
+        else if (image && agent.imageEdits) postLines.push(`[image: ${file.name}, file ${file.id}, which you can't see]`);
+        else postLines.push(fileLine(file));
       }
       lines.push(postLines);
     }
     return { lines, images };
   }
 
-  /** Adds the image to `images`, and returns its line. */
+  /**
+   * Adds the image to `images`, and returns its line. When generate_image takes images, the line gives
+   * its file id, for the model to pass it on.
+   */
   async #image(file: PostFile, images: ImageContent[]): Promise<string> {
-    if (images.length >= MAX_IMAGES) return `[image: ${file.name}, not shown: too many images at once]`;
-    const original = IMAGE_TYPES.has(file.mimeType) && file.size <= MAX_IMAGE_BYTES;
-    if (!original && !file.hasPreview) return `[image: ${file.name}, not shown: too large, or in a format you can't see]`;
+    const name = this.threads.agent.imageEdits ? `${file.name}, file ${file.id}` : file.name;
+    if (images.length >= MAX_IMAGES) return `[image: ${name}, not shown: too many images at once]`;
+    const source = imageSource(file);
+    if (!source) return `[image: ${name}, not shown: too large, or in a format you can't see]`;
     try {
-      const bytes = await this.threads.chat.file(file.id, !original);
-      images.push({ type: 'image', data: Buffer.from(bytes).toString('base64'), mimeType: original ? file.mimeType : 'image/jpeg' });
-      return `[image ${images.length}: ${file.name}]`;
+      const bytes = await this.threads.chat.file(file.id, source.preview);
+      images.push({ type: 'image', data: Buffer.from(bytes).toString('base64'), mimeType: source.mimeType });
+      return `[image ${images.length}: ${name}]`;
     } catch (error) {
       console.warn(`Thread ${this.rootId}: image ${file.id} couldn't be downloaded:`, errorMessage(error));
-      return `[image: ${file.name}, not shown: it couldn't be downloaded]`;
+      return `[image: ${name}, not shown: it couldn't be downloaded]`;
     }
+  }
+
+  /** Keeps an image the agent generated for this run's reply, under a name new to the thread. */
+  #addImage(image: ImageContent): string {
+    const { sessionManager } = this.#session!;
+    const name = `image-${generatedImages(this.#session!).size + 1}.${IMAGE_EXTENSIONS[image.mimeType] ?? 'png'}`;
+    sessionManager.appendCustomEntry(GENERATED_ENTRY, { name, mimeType: image.mimeType } satisfies GeneratedEntry);
+    this.#generated.push({ name, image });
+    return name;
+  }
+
+  /**
+   * The images `refs` name, for generate_image: this run's generated ones as the image model returned
+   * them, earlier ones from their posts, and the thread's posted ones by file id. Only the thread's,
+   * so a reference can't reach files in other channels.
+   */
+  async #images(refs: string[]): Promise<ImageContent[]> {
+    const { chat } = this.threads;
+    const generated = generatedImages(this.#session!);
+    const posted = refs.some((ref) => !generated.has(ref))
+      ? new Map((await chat.threadPosts(this.rootId)).flatMap((p) => p.files).map((f) => [f.id, f]))
+      : new Map<string, PostFile>();
+    return Promise.all(
+      refs.map(async (ref): Promise<ImageContent> => {
+        const current = this.#generated.find((g) => g.name === ref);
+        if (current) return current.image;
+        const earlier = generated.get(ref);
+        if (earlier) {
+          if (!earlier.fileId) throw new Error(`${ref} was never posted, so it can't be used`);
+          return { type: 'image', data: Buffer.from(await chat.file(earlier.fileId, false)).toString('base64'), mimeType: earlier.mimeType };
+        }
+        const file = posted.get(ref);
+        if (!file?.mimeType.startsWith('image/')) {
+          throw new Error(`${ref} is not an image posted in this thread: give the file id from an [image] line, or the name of an image you generated`);
+        }
+        const source = imageSource(file);
+        if (!source) throw new Error(`${file.name} (${ref}) is too large, or in a format that can't be used`);
+        return { type: 'image', data: Buffer.from(await chat.file(file.id, source.preview)).toString('base64'), mimeType: source.mimeType };
+      }),
+    );
   }
 
   async #runJob(session: AgentSession, job: ScheduledJob): Promise<void> {
@@ -340,10 +405,18 @@ class Thread {
     this.#generated.length = 0;
     await session.prompt(prompt, { expandPromptTemplates: false, images });
     const reply = replyText(session, startedAt);
-    const files = this.#generated.splice(0).map((image) => ({ name: image.name, mimeType: image.mimeType, data: Buffer.from(image.data, 'base64') }));
+    const generated = this.#generated.splice(0);
+    const files = generated.map(({ name, image }) => ({ name, mimeType: image.mimeType, data: Buffer.from(image.data, 'base64') }));
     // pi drops an answer cut off at the output limit to compact and retry, and the retry may not happen.
     if (reply === NO_ANSWER) console.warn(`Thread ${this.rootId}: the run added no answer`);
-    if (reply || files.length) await this.threads.chat.reply(this.channelId, this.rootId, reply ?? '', files);
+    if (reply || files.length) {
+      const fileIds = await this.threads.chat.reply(this.channelId, this.rootId, reply ?? '', files);
+      // So later runs can have them changed.
+      fileIds.forEach((fileId, i) => {
+        const { name, mimeType } = files[i]!;
+        if (fileId) session.sessionManager.appendCustomEntry(GENERATED_ENTRY, { name, mimeType, fileId } satisfies GeneratedEntry);
+      });
+    }
     console.log(`Thread ${this.rootId}: replied (${reply?.length ?? 0} chars${files.length ? `, ${files.length} image(s)` : ''})`);
   }
 
@@ -396,6 +469,27 @@ export function trailingModel(message: string): { message: string; ref: string }
   const match = /(?:^|\s)\/(\S+\/\S+)\s*$/.exec(message);
   if (!match) return undefined;
   return { message: message.slice(0, match.index).trimEnd(), ref: match[1]! };
+}
+
+/** The images the agent generated in the session, by name. */
+function generatedImages(session: AgentSession): Map<string, GeneratedEntry> {
+  const images = new Map<string, GeneratedEntry>();
+  for (const entry of session.sessionManager.getEntries()) {
+    if (entry.type === 'custom' && entry.customType === GENERATED_ENTRY) {
+      const image = entry.data as GeneratedEntry;
+      images.set(image.name, image);
+    }
+  }
+  return images;
+}
+
+/**
+ * How an image is handed over: as it is, or as the server's preview when it's too large or in a format
+ * models don't take. Undefined when neither works.
+ */
+function imageSource(file: PostFile): { preview: boolean; mimeType: string } | undefined {
+  if (IMAGE_TYPES.has(file.mimeType) && file.size <= MAX_IMAGE_BYTES) return { preview: false, mimeType: file.mimeType };
+  return file.hasPreview ? { preview: true, mimeType: 'image/jpeg' } : undefined;
 }
 
 /** A file the model only learns the name of. */

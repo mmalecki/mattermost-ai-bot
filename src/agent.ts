@@ -16,13 +16,15 @@ import {
 import { type Config, type ModelChoice, parseModel } from './config.ts';
 import { errorMessage } from './error.ts';
 import { loadScheduler, type ScheduledJob, scheduler } from './scheduler.ts';
-import { type GeneratedImage, imageGeneration, mcpServers, toolGuard, withoutCwd } from './tools.ts';
+import { type ImageStore, imageGeneration, mcpServers, toolGuard, withoutCwd } from './tools.ts';
 
 // Published as TypeScript, which Node won't strip under node_modules, so pi loads it like any
 // installed pi package.
 const FEATHER_PI_WEB = dirname(fileURLToPath(import.meta.resolve('@mmalecki/feather-pi-web/package.json')));
 
 export interface Agent {
+  /** Whether generate_image takes images to change, which posts' images are then given with their file ids for. */
+  readonly imageEdits: boolean;
   /** Whether the thread has a session from an earlier run. */
   hasSession(rootId: string): boolean;
   /**
@@ -35,7 +37,8 @@ export interface Agent {
    * Opens the thread's session, creating it on first use. A new session runs on `model`, MODEL's by
    * default; an existing one on the model it was created with. With the scheduler on, `onScheduled`
    * gets the thread's scheduled jobs as they come due; without it, the session can't schedule any.
-   * Likewise, with IMAGE_MODEL set, `onImage` gets the images the agent generates.
+   * Likewise, with IMAGE_MODEL set, `imageStore` keeps the images the agent generates, and finds those
+   * it is given.
    */
   openSession(
     rootId: string,
@@ -43,7 +46,7 @@ export interface Agent {
       model?: ModelChoice;
       allowTools: (toolName: string) => boolean;
       onScheduled?: (job: ScheduledJob) => void;
-      onImage?: (image: GeneratedImage) => void;
+      imageStore?: ImageStore;
     },
   ): Promise<AgentSession>;
   /** Shuts down the session's extensions, which closes their connections and timers, and disposes it. */
@@ -104,7 +107,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
     const { provider, model: id } = config.imageModel;
     if (!imageModel) throw new Error(`IMAGE_MODEL ${provider}/${id} is neither an image model in pi's catalog nor in ${llm.modelsPath}`);
     requireKey(provider);
-    console.log(`Image model: ${provider}/${id}`);
+    console.log(`Image model: ${provider}/${id}${imageModel.input.includes('image') ? ', edits images' : ''}`);
   }
 
   const schedulerExtension = config.scheduler ? await loadScheduler() : undefined;
@@ -122,7 +125,10 @@ export async function createAgent(config: Config, botUsername: string): Promise<
     session.dispose();
   }
 
+  const imageEdits = !!imageModel?.input.includes('image');
+
   return {
+    imageEdits,
     hasSession: (rootId) => existsSync(sessionFile(rootId)),
 
     pickModel(ref) {
@@ -140,7 +146,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
       return choice;
     },
 
-    async openSession(rootId, { model: choice, allowTools, onScheduled, onImage }) {
+    async openSession(rootId, { model: choice, allowTools, onScheduled, imageStore }) {
       const sessionManager = SessionManager.open(sessionFile(rootId), sessionDir, config.dataDir);
       const { model, thinkingLevel } = sessionModel(rootId, sessionManager, choice);
       const images = model.input.includes('image');
@@ -158,7 +164,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           createToolSearchExtension(),
           toolGuard(allowTools),
           ...(schedulerExtension && onScheduled ? [scheduler(schedulerExtension, onScheduled)] : []),
-          ...(imageModel && onImage ? [imageGeneration(modelRuntime, imageModel, onImage)] : []),
+          ...(imageModel && imageStore ? [imageGeneration(modelRuntime, imageModel, imageStore)] : []),
           withoutCwd(),
         ],
         noExtensions: true,
@@ -172,6 +178,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           scheduler: !!schedulerExtension,
           images,
           imageGeneration: !!imageModel,
+          imageEdits,
           serverUrl: config.mattermost.publicUrl,
           rootId,
         }),
@@ -223,6 +230,8 @@ export interface SystemPromptOptions {
   images: boolean;
   /** Whether the agent has generate_image. */
   imageGeneration: boolean;
+  /** Whether generate_image takes images to change. */
+  imageEdits: boolean;
   /** Where people open the server, for links. */
   serverUrl: string;
   /** The thread's root post, so its link can be given. */
@@ -230,7 +239,7 @@ export interface SystemPromptOptions {
 }
 
 export function buildSystemPrompt(options: SystemPromptOptions): string {
-  const { botUsername, servers, scheduler, images, imageGeneration, serverUrl, rootId } = options;
+  const { botUsername, servers, scheduler, images, imageGeneration, imageEdits, serverUrl, rootId } = options;
   return [
     `You are @${botUsername}, a Mattermost bot that gets things done with your tools.`,
     'Each user message holds one or more Mattermost posts from a thread, as "@username (time, post <id>): text". Several people can take part in one thread.',
@@ -251,6 +260,11 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
       : []),
     ...(imageGeneration
       ? ['Every image you make with generate_image is attached to your reply, in the order you made them. Do not link to them or write them out in your reply.']
+      : []),
+    ...(imageGeneration && imageEdits
+      ? [
+          'To change an image, or make one from it, pass it to generate_image in images: one posted in the thread by the file id on its line, as in "[image 1: name, file <id>]", one you generated by its name. Say what to change in the prompt.',
+        ]
       : []),
     ...directServers(servers),
   ].join('\n');

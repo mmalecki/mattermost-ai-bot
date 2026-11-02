@@ -84,6 +84,11 @@ With `IMAGE_MODEL` set, the agent gets a `generate_image` tool, and every image 
 its reply, up to 10 to a post. It sees them too when the model takes images, scaled down to the model's limits and kept in
 the session file like posted images. Generating is a tool call, so only `allowedUsers` can have the agent make images.
 
+When the image model takes images too, as most do (`"input": ["text", "image"]` in Pi's catalog), the agent can have
+images changed, or new ones made from them: those posted in the thread, which it's given the file ids of, and those
+it generated, by name. It gets the originals, or Mattermost's preview of an image too large or in another format, and
+only from the thread's posts, so a post can't have it reach files elsewhere.
+
 Pi generates images only through OpenRouter so far: `IMAGE_MODEL` is one of
 [its image models](https://openrouter.ai/models?output_modalities=image), and needs `OPENROUTER_API_KEY` whatever
 `MODEL` is. OpenRouter refuses models its account's [data policy](https://openrouter.ai/settings/privacy), such as zero

@@ -20,7 +20,7 @@ test("lists what directly exposed servers offer, in the format of pi's mcp_serve
   assert.deepEqual(directServers({}), []);
 });
 
-const promptOptions = { botUsername: 'sailor', servers: {}, scheduler: false, images: false, imageGeneration: false, serverUrl: 'https://chat.example', rootId: 'r1' };
+const promptOptions = { botUsername: 'sailor', servers: {}, scheduler: false, images: false, imageGeneration: false, imageEdits: false, serverUrl: 'https://chat.example', rootId: 'r1' };
 
 test('links posts without their team, and gives the model the thread\'s link', () => {
   assert.equal(permalink('https://chat.example', 'p1'), 'https://chat.example/_redirect/pl/p1');
@@ -35,6 +35,11 @@ test('tells the model how images come only when it takes them', () => {
 test('tells the model its generated images are attached only when it can generate them', () => {
   assert.match(buildSystemPrompt({ ...promptOptions, imageGeneration: true }), /generate_image is attached to your reply/);
   assert.doesNotMatch(buildSystemPrompt(promptOptions), /generate_image/);
+});
+
+test('tells the model how to give generate_image images only when it takes them', () => {
+  assert.match(buildSystemPrompt({ ...promptOptions, imageGeneration: true, imageEdits: true }), /pass it to generate_image in images/);
+  assert.doesNotMatch(buildSystemPrompt({ ...promptOptions, imageGeneration: true }), /pass it to generate_image/);
 });
 
 /** An agent on `local/small`, from a models.json that also has `local/large`, which takes images. */
