@@ -98,7 +98,14 @@ export async function createAgent(config: Config, botUsername: string): Promise<
         noPromptTemplates: true,
         noThemes: true,
         noContextFiles: true,
-        systemPrompt: buildSystemPrompt(botUsername, config.tools.mcpServers, !!schedulerExtension, images, config.mattermost.publicUrl, rootId),
+        systemPrompt: buildSystemPrompt({
+          botUsername,
+          servers: config.tools.mcpServers,
+          scheduler: !!schedulerExtension,
+          images,
+          serverUrl: config.mattermost.publicUrl,
+          rootId,
+        }),
         // Read on every session open, so edits reach new threads. pi would take a missing path as
         // the text itself, and would look for its own APPEND_SYSTEM.md without an explicit list.
         appendSystemPrompt: existsSync(config.appendSystemPromptPath) ? [config.appendSystemPromptPath] : [],
@@ -136,18 +143,21 @@ export async function createAgent(config: Config, botUsername: string): Promise<
   };
 }
 
-/**
- * `images` is whether the model takes them. `serverUrl` and `rootId` give the model the thread's
- * permalink, and how to link its posts.
- */
-export function buildSystemPrompt(
-  botUsername: string,
-  servers: Record<string, McpServerConfig>,
-  scheduler: boolean,
-  images: boolean,
-  serverUrl: string,
-  rootId: string,
-): string {
+export interface SystemPromptOptions {
+  /** The bot's Mattermost username, so the model knows when it is addressed. */
+  botUsername: string;
+  servers: Record<string, McpServerConfig>;
+  scheduler: boolean;
+  /** Whether the model takes images. */
+  images: boolean;
+  /** Where people open the server, for links. */
+  serverUrl: string;
+  /** The thread's root post, so its link can be given. */
+  rootId: string;
+}
+
+export function buildSystemPrompt(options: SystemPromptOptions): string {
+  const { botUsername, servers, scheduler, images, serverUrl, rootId } = options;
   return [
     `You are @${botUsername}, a Mattermost bot that gets things done with your tools.`,
     'Each user message holds one or more Mattermost posts from a thread, as "@username (time, post <id>): text". Several people can take part in one thread.',
