@@ -15,7 +15,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import type { Config } from './config.ts';
 import { loadScheduler, type ScheduledJob, scheduler } from './scheduler.ts';
-import { mcpServers, toolGuard, withoutCwd } from './tools.ts';
+import { type GeneratedImage, imageGeneration, mcpServers, toolGuard, withoutCwd } from './tools.ts';
 
 // Published as TypeScript, which Node won't strip under node_modules, so pi loads it like any
 // installed pi package.
@@ -28,9 +28,13 @@ export interface Agent {
   hasSession(rootId: string): boolean;
   /**
    * Opens the thread's session, creating it on first use. With the scheduler on, `onScheduled` gets
-   * the thread's scheduled jobs as they come due; without it, the session can't schedule any.
+   * the thread's scheduled jobs as they come due; without it, the session can't schedule any. Likewise,
+   * with IMAGE_MODEL set, `onImage` gets the images the agent generates.
    */
-  openSession(rootId: string, options: { allowTools: (toolName: string) => boolean; onScheduled?: (job: ScheduledJob) => void }): Promise<AgentSession>;
+  openSession(
+    rootId: string,
+    options: { allowTools: (toolName: string) => boolean; onScheduled?: (job: ScheduledJob) => void; onImage?: (image: GeneratedImage) => void },
+  ): Promise<AgentSession>;
   /** Shuts down the session's extensions, which closes their connections and timers, and disposes it. */
   closeSession(session: AgentSession): Promise<void>;
 }
@@ -50,12 +54,23 @@ export async function createAgent(config: Config, botUsername: string): Promise<
   const found = modelRuntime.getModel(llm.provider, llm.model);
   if (!found) throw new Error(`MODEL ${llm.provider}/${llm.model} is neither in pi's catalog nor in ${llm.modelsPath}`);
   // Keys come from pi's own variables, such as MISTRAL_API_KEY, or from models.json.
-  if (!modelRuntime.getProviderAuthStatus(llm.provider).configured) {
-    throw new Error(`No API key for ${llm.provider}: set its variable, such as ${llm.provider.toUpperCase().replace(/-/g, '_')}_API_KEY`);
-  }
+  const requireKey = (provider: string) => {
+    if (!modelRuntime.getProviderAuthStatus(provider).configured) {
+      throw new Error(`No API key for ${provider}: set its variable, such as ${provider.toUpperCase().replace(/-/g, '_')}_API_KEY`);
+    }
+  };
+  requireKey(llm.provider);
   const model = { ...found, maxTokens: Math.min(found.maxTokens, llm.maxTokens) };
   const images = model.input.includes('image');
   console.log(`Model: ${llm.provider}/${llm.model} (${model.api}, thinking ${llm.thinkingLevel}, max ${model.maxTokens} tokens${images ? ', images' : ''})`);
+
+  const imageModel = config.imageModel && modelRuntime.getModelOfType('image', config.imageModel.provider, config.imageModel.model);
+  if (config.imageModel) {
+    const { provider, model: id } = config.imageModel;
+    if (!imageModel) throw new Error(`IMAGE_MODEL ${provider}/${id} is neither an image model in pi's catalog nor in ${llm.modelsPath}`);
+    requireKey(provider);
+    console.log(`Image model: ${provider}/${id}`);
+  }
 
   const schedulerExtension = config.scheduler ? await loadScheduler() : undefined;
   if (schedulerExtension) console.log('Scheduler: on');
@@ -76,7 +91,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
     images,
     hasSession: (rootId) => existsSync(sessionFile(rootId)),
 
-    async openSession(rootId, { allowTools, onScheduled }) {
+    async openSession(rootId, { allowTools, onScheduled, onImage }) {
       const resourceLoader = new DefaultResourceLoader({
         cwd: config.dataDir,
         agentDir,
@@ -91,6 +106,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           createToolSearchExtension(),
           toolGuard(allowTools),
           ...(schedulerExtension && onScheduled ? [scheduler(schedulerExtension, onScheduled)] : []),
+          ...(imageModel && onImage ? [imageGeneration(modelRuntime, imageModel, onImage)] : []),
           withoutCwd(),
         ],
         noExtensions: true,
@@ -103,6 +119,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           servers: config.tools.mcpServers,
           scheduler: !!schedulerExtension,
           images,
+          imageGeneration: !!imageModel,
           serverUrl: config.mattermost.publicUrl,
           rootId,
         }),
@@ -152,6 +169,8 @@ export interface SystemPromptOptions {
   scheduler: boolean;
   /** Whether the model takes images. */
   images: boolean;
+  /** Whether the agent has generate_image. */
+  imageGeneration: boolean;
   /** Where people open the server, for links. */
   serverUrl: string;
   /** The thread's root post, so its link can be given. */
@@ -159,7 +178,7 @@ export interface SystemPromptOptions {
 }
 
 export function buildSystemPrompt(options: SystemPromptOptions): string {
-  const { botUsername, servers, scheduler, images, serverUrl, rootId } = options;
+  const { botUsername, servers, scheduler, images, imageGeneration, serverUrl, rootId } = options;
   return [
     `You are @${botUsername}, a Mattermost bot that gets things done with your tools.`,
     'Each user message holds one or more Mattermost posts from a thread, as "@username (time, post <id>): text". Several people can take part in one thread.',
@@ -177,6 +196,9 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
           'You only act while answering a post. To do anything later or repeatedly ("in 10 minutes", "at 6", "every morning"), call schedule: without it, nothing happens later, so never promise it. Never do it right away instead. If schedule refuses, say why and do nothing.',
           'A due job reaches you as "Scheduled job <id> is due (time): <prompt>"; do what it says, and your reply is posted to the thread.',
         ]
+      : []),
+    ...(imageGeneration
+      ? ['Every image you make with generate_image is attached to your reply, in the order you made them. Do not link to them or write them out in your reply.']
       : []),
     ...directServers(servers),
   ].join('\n');
