@@ -118,9 +118,13 @@ export async function createAgent(config: Config, botUsername: string): Promise<
         settingsManager: SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true, maxRetries: 2 } }),
       });
       // Starts the extensions, which connects the MCP servers. pi catches what their handlers throw and
-      // only reports it here; anything else that fails shuts the session down again.
+      // only reports it here; anything else that fails shuts the session down again. Without a UI, pi
+      // drops the notifications extensions send, MCP connection problems among them; these go to the
+      // console. pi's no-op UI covers the rest. A UI makes `ctx.hasUI` true, which only `/mcp` sign-in
+      // checks, and the bot never runs commands.
       try {
         await session.bindExtensions({
+          uiContext: { ...session.extensionRunner.getUIContext(), notify: logNotification },
           onError: (e) => console.error(`Extension ${e.extensionPath} failed on ${e.event}: ${e.error}`),
         });
       } catch (error) {
@@ -169,4 +173,11 @@ export function directServers(servers: Record<string, McpServerConfig>): string[
 /** Tool names are `mcp__<server>__<tool>`, with `-` in the server name replaced by `_`. */
 function mcpNamespace(server: string): string {
   return `mcp__${server.replace(/[^A-Za-z0-9_]/g, '_')}`;
+}
+
+/** An extension's notification, at its level: `info`, `warning` or `error`. */
+function logNotification(message: string, type: 'info' | 'warning' | 'error' = 'info'): void {
+  if (type === 'error') console.error(message);
+  else if (type === 'warning') console.warn(message);
+  else console.log(message);
 }
