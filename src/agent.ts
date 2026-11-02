@@ -79,8 +79,9 @@ export async function createAgent(config: Config, botUsername: string): Promise<
         agentDir,
         additionalExtensionPaths: [FEATHER_PI_WEB],
         extensionFactories: [
-          // Servers come only from the configured list, never from pi's own mcp.json files.
-          createMcpExtension({ loadConfig: () => ({ servers: [], errors: [] }), logPath: join(agentDir, 'mcp.log') }),
+          // Servers come only from the configured list, never from pi's own mcp.json files. Their log
+          // messages go to the console: pi appends each one to the file, which works on a stream too.
+          createMcpExtension({ loadConfig: () => ({ servers: [], errors: [] }), logPath: '/dev/stderr' }),
           mcpServers(config.tools.mcpServers),
           // Registered inactive. The MCP extension turns them on for servers with `codemode` or
           // `deferred` exposure.
