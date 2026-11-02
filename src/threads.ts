@@ -1,6 +1,7 @@
 import type { AssistantMessage, ImageContent } from '@earendil-works/pi-ai';
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import type { Agent } from './agent.ts';
+import { errorMessage } from './error.ts';
 import { pendingJobs, type ScheduledJob } from './scheduler.ts';
 
 export interface ThreadPost {
@@ -358,8 +359,4 @@ function replyText(session: AgentSession, startedAt: number): string | undefined
     return text ? `${text}\n\n_(Cut off at the output limit.)_` : "Sorry, I couldn't finish: I reached the output limit.";
   }
   return text || undefined;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

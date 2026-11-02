@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { CreateAgentSessionOptions, McpServerConfig } from '@earendil-works/pi-coding-agent';
+import { errorMessage } from './error.ts';
 
 export interface Config {
   /** `publicUrl` is where people open the server, for links: `url` may be one only the bot reaches. */
@@ -100,7 +101,7 @@ export function loadTools(path: string, required: boolean): ToolsConfig {
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch (error) {
-    throw new Error(`${path}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`${path}: ${errorMessage(error)}`);
   }
   if (!isRecord(parsed) || (parsed.mcpServers !== undefined && !isRecord(parsed.mcpServers))) {
     throw new Error(`${path}: expected an object with an "mcpServers" object`);
