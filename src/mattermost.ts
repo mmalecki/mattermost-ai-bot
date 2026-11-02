@@ -1,6 +1,7 @@
 import { Client4, WebSocketClient, type WebSocketMessage, type WebSocketMessages } from '@mattermost/client';
+import type { FileInfo } from '@mattermost/types/files';
 import type { Post } from '@mattermost/types/posts';
-import type { Chat, IncomingPost, ThreadPost } from './threads.ts';
+import type { Chat, IncomingPost, PostFile, ThreadPost } from './threads.ts';
 
 /** Mattermost's default MaxPostSize is 16383 characters; leave room for continuation. */
 const MAX_POST_CHARS = 16_000;
@@ -111,7 +112,7 @@ export class Mattermost implements Chat {
     return Object.values(posts)
       .filter((p) => p.user_id !== this.botUserId && !p.type && !p.delete_at)
       .sort((a, b) => a.create_at - b.create_at)
-      .map((p) => ({ id: p.id, userId: p.user_id, createAt: p.create_at, message: p.message }));
+      .map((p) => ({ id: p.id, userId: p.user_id, createAt: p.create_at, message: p.message, files: (p.metadata?.files ?? []).map(toFile) }));
   }
 
   username(userId: string): Promise<string> {
@@ -148,6 +149,10 @@ export function updatedUser(msg: WebSocketMessage): { id: string; username: stri
   if ((msg.event as string) !== 'user_updated') return undefined;
   const { user } = (msg as WebSocketMessages.UserUpdated).data;
   return { id: user.id, username: user.username };
+}
+
+function toFile(file: FileInfo): PostFile {
+  return { id: file.id, name: file.name, mimeType: file.mime_type, size: file.size, hasPreview: file.has_preview_image };
 }
 
 function toIncoming(post: Post, direct: boolean, mentioned: boolean): IncomingPost {

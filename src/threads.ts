@@ -8,6 +8,18 @@ export interface ThreadPost {
   userId: string;
   createAt: number;
   message: string;
+  files: PostFile[];
+}
+
+/** A file attached to a post. */
+export interface PostFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  /** In bytes. */
+  size: number;
+  /** Whether the server has a smaller JPEG of it, for images. */
+  hasPreview: boolean;
 }
 
 /** What threads need of the chat server. */
@@ -195,7 +207,8 @@ class Thread {
     session.sessionManager.appendCustomEntry(SEEN_ENTRY, seen);
 
     console.log(`Thread ${this.rootId}: ${posts.length} new post(s) from ${[...new Set(names)].join(', ')}`);
-    await this.#answer(session, formatPosts(posts, names));
+    const attachments = posts.map((p) => p.files.map(fileLine));
+    await this.#answer(session, formatPosts(posts, names, attachments));
   }
 
   async #runJob(session: AgentSession, job: ScheduledJob): Promise<void> {
@@ -264,8 +277,19 @@ const timeFormat = new Intl.DateTimeFormat('sv-SE', {
   timeZoneName: 'shortOffset',
 });
 
-export function formatPosts(posts: ThreadPost[], names: string[]): string {
-  return posts.map((p, i) => `@${names[i]} (${timeFormat.format(p.createAt)}, post ${p.id}): ${p.message}`).join('\n\n');
+/** A file the model only learns the name of. */
+function fileLine(file: PostFile): string {
+  return `[file: ${file.name} (${file.mimeType || 'unknown type'}), which you can't open]`;
+}
+
+/** `attachments` are each post's lines for its files, so a post with only a file isn't empty. */
+export function formatPosts(posts: ThreadPost[], names: string[], attachments: string[][] = []): string {
+  return posts
+    .map((p, i) => {
+      const text = [p.message, ...(attachments[i] ?? [])].filter(Boolean).join('\n');
+      return `@${names[i]} (${timeFormat.format(p.createAt)}, post ${p.id}): ${text}`;
+    })
+    .join('\n\n');
 }
 
 export function formatJob(job: ScheduledJob, now: number): string {

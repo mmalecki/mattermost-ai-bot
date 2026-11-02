@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import type { Agent } from '../src/agent.ts';
 import type { ScheduledJob } from '../src/scheduler.ts';
-import { type Chat, type IncomingPost, type ThreadPost, Threads } from '../src/threads.ts';
+import { type Chat, type IncomingPost, type PostFile, type ThreadPost, Threads } from '../src/threads.ts';
 
 const BOT = 'bot';
 const USERS: Record<string, string> = { u1: 'maciej', u2: 'guest', u3: 'carol' };
@@ -14,11 +14,11 @@ class FakeChat implements Chat {
   /** Posts ever added to each thread, deleted ones included. */
   #counts = new Map<string, number>();
 
-  add(rootId: string, userId: string, message: string): ThreadPost {
+  add(rootId: string, userId: string, message: string, files: PostFile[] = []): ThreadPost {
     const thread = this.posts.get(rootId) ?? [];
     const n = this.#counts.get(rootId) ?? 0;
     this.#counts.set(rootId, n + 1);
-    const post = { id: `p${n}`, userId, createAt: Date.UTC(2026, 9, 25, 16, n), message };
+    const post = { id: `p${n}`, userId, createAt: Date.UTC(2026, 9, 25, 16, n), message, files };
     thread.push(post);
     this.posts.set(rootId, thread);
     return post;
@@ -157,6 +157,15 @@ test('a mention mid-thread hands the agent the whole thread so far', async () =>
   threads.handle(incoming('r1', chat.add('r1', 'u1', '@sailor can you check?'), { mentioned: true }));
   await threads.idle();
   assert.equal(sessions.get('r1')!.prompts[0]!.split('\n\n').length, 3);
+  await threads.close();
+});
+
+test("a post's files are named, so one with only a file isn't empty", async () => {
+  const { chat, sessions, threads } = setup();
+  const pdf = { id: 'f1', name: 'invoice.pdf', mimeType: 'application/pdf', size: 1000, hasPreview: false };
+  threads.handle(incoming('r1', chat.add('r1', 'u1', '', [pdf]), { id: 'r1', direct: true }));
+  await threads.idle();
+  assert.match(sessions.get('r1')!.prompts[0]!, /^@maciej \(.+\): \[file: invoice\.pdf \(application\/pdf\), which you can't open\]$/);
   await threads.close();
 });
 

@@ -147,7 +147,7 @@ async function runCase(c: Case, run: number): Promise<Result> {
     void session.abort();
   }, timeoutMs);
   try {
-    await session.prompt(formatPosts([{ id: 'p', userId: 'u', createAt: started, message: c.post }], ['mmalecki']), { expandPromptTemplates: false });
+    await session.prompt(formatPosts([{ id: 'p', userId: 'u', createAt: started, message: c.post, files: [] }], ['mmalecki']), { expandPromptTemplates: false });
     const assistant = session.messages.filter((m) => m.role === 'assistant') as AssistantMessage[];
     const calls = assistant.flatMap((m) => m.content.flatMap((b) => (b.type === 'toolCall' ? [b] : [])));
     const toolCalls = calls.map((b) => b.name);
