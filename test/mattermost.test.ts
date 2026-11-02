@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WebSocketMessage } from '@mattermost/client';
-import { incomingPost, mentions, splitMessage, updatedUser } from '../src/mattermost.ts';
+import { incomingPost, mentions, replyPosts, splitMessage, updatedUser } from '../src/mattermost.ts';
 
 function posted(post: object, data: object = {}): WebSocketMessage {
   return {
@@ -83,4 +83,15 @@ test('splitting keeps indentation, whitespace at hard cuts, and surrogate pairs'
   assert.deepEqual(splitMessage('aaaa\n\n  bb', 8), ['aaaa', '  bb']);
   assert.deepEqual(splitMessage('abcd efgh', 5), ['abcd ', 'efgh']);
   assert.deepEqual(splitMessage('😀😀😀', 3), ['😀', '😀', '😀']);
+});
+
+test('a reply\'s files go on its first posts, and any left over on posts of their own', () => {
+  assert.deepEqual(replyPosts('hi', [], 10, 2), [{ message: 'hi', file_ids: [] }]);
+  assert.deepEqual(replyPosts('', ['f1'], 10, 2), [{ message: '', file_ids: ['f1'] }]);
+  assert.deepEqual(replyPosts('one\n\ntwo', ['f1', 'f2', 'f3', 'f4', 'f5'], 5, 2), [
+    { message: 'one', file_ids: ['f1', 'f2'] },
+    { message: 'two', file_ids: ['f3', 'f4'] },
+    { message: '', file_ids: ['f5'] },
+  ]);
+  assert.deepEqual(replyPosts('', [], 10, 2), []);
 });

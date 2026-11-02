@@ -3,6 +3,7 @@ import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import type { Agent } from './agent.ts';
 import { errorMessage } from './error.ts';
 import { pendingJobs, type ScheduledJob } from './scheduler.ts';
+import type { GeneratedImage } from './tools.ts';
 
 export interface ThreadPost {
   id: string;
@@ -23,6 +24,14 @@ export interface PostFile {
   hasPreview: boolean;
 }
 
+/** A file to attach to a reply. */
+export interface OutgoingFile {
+  name: string;
+  mimeType: string;
+  /** Not a SharedArrayBuffer view, which Blob won't take. */
+  data: Uint8Array<ArrayBuffer>;
+}
+
 /** What threads need of the chat server. */
 export interface Chat {
   /** The thread's posts, oldest first, without the bot's own and system posts. */
@@ -30,7 +39,8 @@ export interface Chat {
   /** A file's contents, or with `preview`, the server's smaller JPEG of an image. */
   file(fileId: string, preview: boolean): Promise<Uint8Array>;
   username(userId: string): Promise<string>;
-  reply(channelId: string, rootId: string, message: string): Promise<void>;
+  /** Posts `message`, which may be empty when there are files, with `files` attached. */
+  reply(channelId: string, rootId: string, message: string, files?: OutgoingFile[]): Promise<void>;
   typing(channelId: string, rootId: string): void;
 }
 
@@ -128,6 +138,8 @@ class Thread {
   #pending = false;
   /** Scheduled jobs that came due, run after any new posts. */
   readonly #jobs: ScheduledJob[] = [];
+  /** Images the agent generated in the current run, posted with its reply. */
+  readonly #generated: GeneratedImage[] = [];
   /** Whether the current run may call tools. */
   #allowed = false;
   #idleTimer: NodeJS.Timeout | undefined;
@@ -189,6 +201,7 @@ class Thread {
           const session = (this.#session ??= await agent.openSession(this.rootId, {
             allowTools: () => this.#allowed,
             onScheduled: (due) => this.due(due),
+            onImage: (image) => this.#generated.push(image),
           }));
           await (job ? this.#runJob(session, job) : this.#answerPosts(session));
         } catch (error) {
@@ -282,12 +295,15 @@ class Thread {
 
   async #answer(session: AgentSession, prompt: string, images: ImageContent[] = []): Promise<void> {
     const startedAt = Date.now();
+    // Only this run's: those of a run that threw were never posted, and aren't now.
+    this.#generated.length = 0;
     await session.prompt(prompt, { expandPromptTemplates: false, images });
     const reply = replyText(session, startedAt);
+    const files = this.#generated.splice(0).map((image) => ({ name: image.name, mimeType: image.mimeType, data: Buffer.from(image.data, 'base64') }));
     // pi drops an answer cut off at the output limit to compact and retry, and the retry may not happen.
     if (reply === NO_ANSWER) console.warn(`Thread ${this.rootId}: the run added no answer`);
-    if (reply) await this.threads.chat.reply(this.channelId, this.rootId, reply);
-    console.log(`Thread ${this.rootId}: replied (${reply?.length ?? 0} chars)`);
+    if (reply || files.length) await this.threads.chat.reply(this.channelId, this.rootId, reply ?? '', files);
+    console.log(`Thread ${this.rootId}: replied (${reply?.length ?? 0} chars${files.length ? `, ${files.length} image(s)` : ''})`);
   }
 
   #scheduleIdle(): void {

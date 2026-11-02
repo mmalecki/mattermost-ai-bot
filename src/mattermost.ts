@@ -1,10 +1,13 @@
 import { Client4, WebSocketClient, type WebSocketMessage, type WebSocketMessages } from '@mattermost/client';
 import type { FileInfo } from '@mattermost/types/files';
 import type { Post } from '@mattermost/types/posts';
-import type { Chat, IncomingPost, PostFile, ThreadPost } from './threads.ts';
+import { errorMessage } from './error.ts';
+import type { Chat, IncomingPost, OutgoingFile, PostFile, ThreadPost } from './threads.ts';
 
 /** Mattermost's default MaxPostSize is 16383 characters; leave room for continuation. */
 const MAX_POST_CHARS = 16_000;
+/** Mattermost attaches at most 10 files to a post. */
+const MAX_POST_FILES = 10;
 /** Catching up starts this long before the last event, for clock skew; posts already seen are skipped. */
 const CATCH_UP_MARGIN_MS = 60_000;
 /** Older posts aren't caught up on: after a long outage, they're old news. */
@@ -135,10 +138,32 @@ export class Mattermost implements Chat {
     return name;
   }
 
-  async reply(channelId: string, rootId: string, message: string): Promise<void> {
-    for (const chunk of splitMessage(message, MAX_POST_CHARS)) {
-      await this.#client.createPost({ channel_id: channelId, root_id: rootId, message: chunk });
+  async reply(channelId: string, rootId: string, message: string, files: OutgoingFile[] = []): Promise<void> {
+    // A file that can't be uploaded is named in the reply instead, so the answer still gets through.
+    const uploads = await Promise.allSettled(files.map((file) => this.#upload(channelId, file)));
+    const fileIds: string[] = [];
+    const failures: string[] = [];
+    uploads.forEach((upload, i) => {
+      if (upload.status === 'fulfilled') fileIds.push(upload.value);
+      else {
+        console.error(`Uploading ${files[i]!.name} failed:`, upload.reason);
+        failures.push(`_(${files[i]!.name} couldn't be attached: ${errorMessage(upload.reason)})_`);
+      }
+    });
+    const text = [message, ...failures].filter(Boolean).join('\n\n');
+    for (const post of replyPosts(text, fileIds, MAX_POST_CHARS, MAX_POST_FILES)) {
+      await this.#client.createPost({ channel_id: channelId, root_id: rootId, ...post });
     }
+  }
+
+  async #upload(channelId: string, file: OutgoingFile): Promise<string> {
+    const form = new FormData();
+    form.append('channel_id', channelId);
+    form.append('files', new Blob([file.data], { type: file.mimeType }), file.name);
+    const { file_infos } = await this.#client.uploadFile(form);
+    const id = file_infos[0]?.id;
+    if (!id) throw new Error('the server returned no file');
+    return id;
   }
 
   typing(channelId: string, rootId: string): void {
@@ -176,6 +201,20 @@ function toIncoming(post: Post, direct: boolean, mentioned: boolean): IncomingPo
 export function mentions(message: string, username: string): boolean {
   const escaped = username.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
   return new RegExp(`(?<![\\w@.-])@${escaped}(?![\\w-]|\\.[\\w-])`, 'i').test(message);
+}
+
+/**
+ * The posts a reply takes: its text split to fit `maxChars`, with the files on the first ones,
+ * `maxFiles` to a post, and any left over on posts of their own after the text.
+ */
+export function replyPosts(message: string, fileIds: string[], maxChars: number, maxFiles: number): { message: string; file_ids: string[] }[] {
+  const posts = splitMessage(message, maxChars).map((part) => ({ message: part, file_ids: [] as string[] }));
+  for (let i = 0; i * maxFiles < fileIds.length; i++) {
+    const group = fileIds.slice(i * maxFiles, (i + 1) * maxFiles);
+    if (posts[i]) posts[i]!.file_ids = group;
+    else posts.push({ message: '', file_ids: group });
+  }
+  return posts;
 }
 
 /**

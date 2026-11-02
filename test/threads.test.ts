@@ -4,14 +4,16 @@ import type { ImageContent } from '@earendil-works/pi-ai';
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import type { Agent } from '../src/agent.ts';
 import type { ScheduledJob } from '../src/scheduler.ts';
-import { type Chat, type IncomingPost, type PostFile, type ThreadPost, Threads } from '../src/threads.ts';
+import { type Chat, type IncomingPost, type OutgoingFile, type PostFile, type ThreadPost, Threads } from '../src/threads.ts';
+import type { GeneratedImage } from '../src/tools.ts';
 
 const BOT = 'bot';
 const USERS: Record<string, string> = { u1: 'maciej', u2: 'guest', u3: 'carol' };
 
 class FakeChat implements Chat {
   posts = new Map<string, ThreadPost[]>();
-  replies: { channelId: string; rootId: string; message: string }[] = [];
+  /** `files` only when the reply has some. */
+  replies: { channelId: string; rootId: string; message: string; files?: OutgoingFile[] }[] = [];
   /** Posts ever added to each thread, deleted ones included. */
   #counts = new Map<string, number>();
 
@@ -45,8 +47,8 @@ class FakeChat implements Chat {
     if (this.gone.has(userId)) throw new Error(`no user ${userId}`);
     return USERS[userId] ?? userId;
   }
-  async reply(channelId: string, rootId: string, message: string) {
-    this.replies.push({ channelId, rootId, message });
+  async reply(channelId: string, rootId: string, message: string, files: OutgoingFile[] = []) {
+    this.replies.push({ channelId, rootId, message, ...(files.length ? { files } : {}) });
   }
   typing() {}
 }
@@ -60,6 +62,7 @@ interface FakeSession {
   allowed: boolean[];
   entries: unknown[];
   onScheduled: ((job: ScheduledJob) => void) | undefined;
+  onImage: ((image: GeneratedImage) => void) | undefined;
   closed: boolean;
 }
 
@@ -72,9 +75,9 @@ function fakeAgent(answer: Answer = () => 'ok', images = true) {
   const agent: Agent = {
     images,
     hasSession: (rootId) => sessions.has(rootId),
-    async openSession(rootId, { allowTools, onScheduled }) {
+    async openSession(rootId, { allowTools, onScheduled, onImage }) {
       const entries: unknown[] = [];
-      const record: FakeSession = { prompts: [], images: [], allowed: [], entries, onScheduled, closed: false };
+      const record: FakeSession = { prompts: [], images: [], allowed: [], entries, onScheduled, onImage, closed: false };
       sessions.set(rootId, record);
       const messages: unknown[] = [];
       const session = {
@@ -476,5 +479,58 @@ test('a thread stays open while its session has scheduled jobs pending', async (
   t.mock.timers.tick(60_000);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(session.closed, true);
+  await threads.close();
+});
+
+const FOX = { name: 'image-1.png', mimeType: 'image/png', data: Buffer.from('fox').toString('base64') };
+const OWL = { name: 'image-2.webp', mimeType: 'image/webp', data: Buffer.from('owl').toString('base64') };
+
+test("images the agent generates are posted with the run's reply, decoded", async () => {
+  const { chat, sessions, threads } = setup((prompt) => {
+    if (prompt.includes('thanks')) return 'ok';
+    sessions.get('r1')!.onImage!(FOX);
+    sessions.get('r1')!.onImage!(OWL);
+    return 'A fox and an owl.';
+  });
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'draw a fox and an owl'), { id: 'r1', direct: true }));
+  await threads.idle();
+  assert.deepEqual(chat.replies, [
+    {
+      channelId: 'c1',
+      rootId: 'r1',
+      message: 'A fox and an owl.',
+      files: [
+        { name: 'image-1.png', mimeType: 'image/png', data: Buffer.from('fox') },
+        { name: 'image-2.webp', mimeType: 'image/webp', data: Buffer.from('owl') },
+      ],
+    },
+  ]);
+
+  // The next run's reply carries only its own.
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'thanks')));
+  await threads.idle();
+  assert.deepEqual(chat.replies[1], { channelId: 'c1', rootId: 'r1', message: 'ok' });
+  await threads.close();
+});
+
+test('generated images are posted without text, and with a run that fails', async () => {
+  let fail = false;
+  const { chat, sessions, threads } = setup(() => {
+    sessions.get('r1')!.onImage!(FOX);
+    if (fail) throw new Error('rate limited');
+    return '';
+  });
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'draw a fox'), { id: 'r1', direct: true }));
+  await threads.idle();
+  fail = true;
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'again')));
+  await threads.idle();
+  assert.deepEqual(
+    chat.replies.map((r) => [r.message, r.files?.map((f) => f.name)]),
+    [
+      ['', ['image-1.png']],
+      ["Sorry, I couldn't finish: rate limited", ['image-1.png']],
+    ],
+  );
   await threads.close();
 });
