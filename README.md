@@ -19,6 +19,8 @@ Set in `.env`:
 * `MAX_OUTPUT_TOKENS` - default 8192, or the model's own limit if lower. It includes reasoning, and keeps a model
   stuck repeating itself from running for long
 * `PARALLEL_API_KEY` - enables `websearch` through [Parallel](https://parallel.ai)
+* `IMAGE_MODEL` - enables `generate_image`, with this model, as `provider/model` like `MODEL` but without thinking,
+  for example `openrouter/google/gemini-3.1-flash-image`. See below
 * `MCP_CONFIG` - path to the tools configuration, below. Default `./mcp.json`, which may be missing
 * `DATA_DIR` - default `./data`
 * `SCHEDULER` - `true` lets the agent schedule jobs in a thread, once or repeatedly, with
@@ -60,6 +62,16 @@ images attached to posts, scaled down to the model's limits. Up to 8 go with eac
 names of other files, and of images when the model doesn't take them.
 
 Images are kept in the thread's session file, and sent with every later run in the thread until it's compacted.
+
+### Generating images
+With `IMAGE_MODEL` set, the agent gets a `generate_image` tool, and every image it generates in a run is attached to
+its reply, up to 10 to a post. It sees them too when the model takes images, scaled down to the model's limits and kept in
+the session file like posted images. Generating is a tool call, so only `allowedUsers` can have the agent make images.
+
+Pi generates images only through OpenRouter so far: `IMAGE_MODEL` is one of
+[its image models](https://openrouter.ai/models?output_modalities=image), and needs `OPENROUTER_API_KEY` whatever
+`MODEL` is. OpenRouter refuses models its account's [data policy](https://openrouter.ai/settings/privacy), such as zero
+data retention, rules out.
 
 ### Tools
 `mcp.json` uses [Pi's MCP configuration format](https://pi.dev/docs/latest/mcp), with one addition: `allowedUsers`, the
