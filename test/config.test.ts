@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig, loadTools, parseModel } from '../src/config.ts';
+import { loadConfig, loadTools, parseImageModel, parseModel } from '../src/config.ts';
 
 const base = { MATTERMOST_URL: 'http://mm.local/', MATTERMOST_TOKEN: 'mm', MODEL: 'mistral/mistral-small-2603' };
 
@@ -28,6 +28,17 @@ test('parses provider/model[:thinking] as pi does', () => {
   assert.deepEqual(parseModel('openrouter/mistralai/mistral-small-2603'), { provider: 'openrouter', model: 'mistralai/mistral-small-2603', thinkingLevel: 'off' });
   assert.deepEqual(parseModel('local/bartowski/gemma-GGUF:Q4_K_M'), { provider: 'local', model: 'bartowski/gemma-GGUF:Q4_K_M', thinkingLevel: 'off' });
   for (const bad of ['mistral-small-2603', '/model', 'mistral/']) assert.throws(() => parseModel(bad), /MODEL must be provider\/model/);
+});
+
+test('IMAGE_MODEL is a provider/model without a thinking level, and unset by default', () => {
+  assert.equal(loadConfig(base).imageModel, undefined);
+  assert.equal(loadConfig({ ...base, IMAGE_MODEL: ' ' }).imageModel, undefined);
+  assert.deepEqual(loadConfig({ ...base, IMAGE_MODEL: 'openrouter/google/gemini-2.5-flash-image' }).imageModel, {
+    provider: 'openrouter',
+    model: 'google/gemini-2.5-flash-image',
+  });
+  assert.throws(() => parseImageModel('flux'), /IMAGE_MODEL must be provider\/model/);
+  assert.throws(() => parseImageModel('openrouter/google/gemini-2.5-flash-image:high'), /IMAGE_MODEL takes no thinking level/);
 });
 
 test('APPEND_SYSTEM.md sits next to the MCP config', () => {

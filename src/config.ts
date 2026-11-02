@@ -16,6 +16,8 @@ export interface Config {
     /** pi's `models.json`, for endpoints its catalog doesn't know. Used when the file exists. */
     modelsPath: string;
   };
+  /** The model the agent generates images with, from pi's catalog or `modelsPath`. Unset: no images. */
+  imageModel: { provider: string; model: string } | undefined;
   tools: ToolsConfig;
   /** Whether the agent can schedule jobs in its threads, with pi-ate-scheduler. */
   scheduler: boolean;
@@ -65,6 +67,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       // pi's own file for custom providers, kept next to the tools like APPEND_SYSTEM.md.
       modelsPath: join(dirname(mcpConfig), 'models.json'),
     },
+    imageModel: env.IMAGE_MODEL?.trim() ? parseImageModel(env.IMAGE_MODEL.trim()) : undefined,
     // A missing default file means no MCP servers; a missing file that was asked for is an error.
     tools: loadTools(mcpConfig, !!env.MCP_CONFIG),
     scheduler: flag('SCHEDULER'),
@@ -92,6 +95,18 @@ export function parseModel(ref: string): Pick<Config['llm'], 'provider' | 'model
     model = model.slice(0, colon);
   }
   return { provider, model, thinkingLevel };
+}
+
+/** `provider/model`, as MODEL takes it, without a thinking level: image models don't think. */
+export function parseImageModel(ref: string): NonNullable<Config['imageModel']> {
+  let parsed;
+  try {
+    parsed = parseModel(ref);
+  } catch {
+    throw new Error(`IMAGE_MODEL must be provider/model, such as openrouter/google/gemini-2.5-flash-image, not "${ref}"`);
+  }
+  if (parsed.thinkingLevel !== 'off') throw new Error(`IMAGE_MODEL takes no thinking level, as in "${ref}"`);
+  return { provider: parsed.provider, model: parsed.model };
 }
 
 /** Reads pi's `mcp.json` format, plus a top-level `allowedUsers` list that gates every tool call. */
