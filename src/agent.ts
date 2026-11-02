@@ -57,7 +57,6 @@ export async function createAgent(config: Config, botUsername: string): Promise<
   const schedulerExtension = config.scheduler ? await loadScheduler() : undefined;
   if (schedulerExtension) console.log('Scheduler: on');
 
-  const systemPrompt = buildSystemPrompt(botUsername, config.tools.mcpServers, !!schedulerExtension);
   const sessionFile = (rootId: string) => join(sessionDir, `${rootId}.jsonl`);
 
   async function closeSession(session: AgentSession): Promise<void> {
@@ -95,7 +94,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
         noPromptTemplates: true,
         noThemes: true,
         noContextFiles: true,
-        systemPrompt,
+        systemPrompt: buildSystemPrompt(botUsername, config.tools.mcpServers, !!schedulerExtension, config.mattermost.url, rootId),
         // Read on every session open, so edits reach new threads. pi would take a missing path as
         // the text itself, and would look for its own APPEND_SYSTEM.md without an explicit list.
         appendSystemPrompt: existsSync(config.appendSystemPromptPath) ? [config.appendSystemPromptPath] : [],
@@ -133,10 +132,12 @@ export async function createAgent(config: Config, botUsername: string): Promise<
   };
 }
 
-function buildSystemPrompt(botUsername: string, servers: Record<string, McpServerConfig>, scheduler: boolean): string {
+/** `serverUrl` and `rootId` give the model the thread's permalink, and how to link its posts. */
+export function buildSystemPrompt(botUsername: string, servers: Record<string, McpServerConfig>, scheduler: boolean, serverUrl: string, rootId: string): string {
   return [
     `You are @${botUsername}, a Mattermost bot that gets things done with your tools.`,
-    'Each user message holds one or more Mattermost posts from a thread, as "@username (time): text". Several people can take part in one thread.',
+    'Each user message holds one or more Mattermost posts from a thread, as "@username (time, post <id>): text". Several people can take part in one thread.',
+    `This thread's link is ${permalink(serverUrl, rootId)}, and a post's is ${permalink(serverUrl, '<id>')}: use them to point to the thread or a post in it.`,
     'Your reply is posted to the thread as Mattermost markdown.',
     'What you change happens in the real world. Look before you change anything: get the current state first, and only change things in a later step, once you have seen it. Never send a change in the same batch as the look.',
     'Change only what the request covers: "the lights that are on" means those lights. Act on a whole group, such as every light, only when asked for all of it, and do not turn things on or off to get there.',
@@ -163,6 +164,14 @@ export function directServers(servers: Record<string, McpServerConfig>): string[
     .filter(([, config]) => config.exposure === 'direct' && config.enabled !== false && config.description?.trim())
     .map(([name, config]) => `- ${mcpNamespace(name)} (direct): ${config.description!.trim().split('\n', 1)[0]}`);
   return lines.length ? ['\nYour tools come from these MCP servers:', ...lines] : [];
+}
+
+/**
+ * A link to the post that works without its team's name, which Mattermost looks up. A thread's link
+ * is its root post's.
+ */
+export function permalink(serverUrl: string, postId: string): string {
+  return `${serverUrl}/_redirect/pl/${postId}`;
 }
 
 /** Tool names are `mcp__<server>__<tool>`, with `-` in the server name replaced by `_`. */

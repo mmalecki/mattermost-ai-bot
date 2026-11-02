@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { directServers } from '../src/agent.ts';
+import { buildSystemPrompt, directServers, permalink } from '../src/agent.ts';
 
 test("lists what directly exposed servers offer, in the format of pi's mcp_servers section", () => {
   assert.deepEqual(
@@ -13,4 +13,10 @@ test("lists what directly exposed servers offer, in the format of pi's mcp_serve
     ['\nYour tools come from these MCP servers:', '- mcp__home_assistant (direct): The home'],
   );
   assert.deepEqual(directServers({}), []);
+});
+
+test('links posts without their team, and gives the model the thread\'s link', () => {
+  assert.equal(permalink('https://chat.example', 'p1'), 'https://chat.example/_redirect/pl/p1');
+  const prompt = buildSystemPrompt('sailor', {}, false, 'https://chat.example', 'r1');
+  assert.match(prompt, /This thread's link is https:\/\/chat\.example\/_redirect\/pl\/r1, and a post's is https:\/\/chat\.example\/_redirect\/pl\/<id>/);
 });

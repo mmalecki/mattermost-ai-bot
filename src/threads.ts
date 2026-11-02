@@ -265,7 +265,7 @@ const timeFormat = new Intl.DateTimeFormat('sv-SE', {
 });
 
 export function formatPosts(posts: ThreadPost[], names: string[]): string {
-  return posts.map((p, i) => `@${names[i]} (${timeFormat.format(p.createAt)}): ${p.message}`).join('\n\n');
+  return posts.map((p, i) => `@${names[i]} (${timeFormat.format(p.createAt)}, post ${p.id}): ${p.message}`).join('\n\n');
 }
 
 export function formatJob(job: ScheduledJob, now: number): string {

@@ -144,7 +144,7 @@ test('follow-ups in a known thread need no mention and carry only unseen posts',
 
   const { prompts } = sessions.get('r1')!;
   assert.equal(prompts.length, 2);
-  assert.match(prompts[0]!, /^@maciej \(\d{4}-\d\d-\d\d \d\d:\d\d GMT[+-−]?\d*\): @sailor lights\?$/);
+  assert.match(prompts[0]!, /^@maciej \(\d{4}-\d\d-\d\d \d\d:\d\d GMT[+-−]?\d*, post p\d+\): @sailor lights\?$/);
   assert.match(prompts[1]!, /^@guest \(.+\): and the heating\?$/);
   assert.equal(chat.replies.length, 2);
   await threads.close();
