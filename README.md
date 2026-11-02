@@ -21,7 +21,7 @@ Set in `.env`:
   stuck repeating itself from running for long
 * `PARALLEL_API_KEY` - enables `websearch` through [Parallel](https://parallel.ai)
 * `IMAGE_MODEL` - enables `generate_image`, with this model, as `provider/model` like `MODEL` but without thinking,
-  for example `openrouter/google/gemini-3.1-flash-image`. See below
+  for example `openrouter/bytedance-seed/seedream-5-0-pro`. See below
 * `MCP_CONFIG` - path to the tools configuration, below. Default `./mcp.json`, which may be missing
 * `DATA_DIR` - default `./data`
 * `SCHEDULER` - `true` lets the agent schedule jobs in a thread, once or repeatedly, with
@@ -87,7 +87,10 @@ the session file like posted images. Generating is a tool call, so only `allowed
 When the image model takes images too, as most do (`"input": ["text", "image"]` in Pi's catalog), the agent can have
 images changed, or new ones made from them: those posted in the thread, which it's given the file ids of, and those
 it generated, by name. It gets the originals, or Mattermost's preview of an image too large or in another format, and
-only from the thread's posts, so a post can't have it reach files elsewhere.
+only from the thread's posts, so a post can't have it reach files elsewhere. Images other tools return in the thread,
+such as `webfetch` or an MCP server, are named in their results so the agent can pass them on too, as Pi keeps them:
+scaled down to the chat model's limits. Some image models take only one image at a time, such as
+`microsoft/mai-image-2.6`, which can't combine images then.
 
 Pi generates images only through OpenRouter so far: `IMAGE_MODEL` is one of
 [its image models](https://openrouter.ai/models?output_modalities=image), and needs `OPENROUTER_API_KEY` whatever

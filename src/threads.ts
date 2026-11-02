@@ -89,6 +89,19 @@ interface GeneratedEntry {
   fileId?: string;
 }
 
+/**
+ * Session entry naming an image another tool returned, which stays in the session as part of its result.
+ * Not part of the model's context.
+ */
+const FETCHED_ENTRY = 'fetched-image';
+
+interface FetchedEntry {
+  name: string;
+  toolCallId: string;
+  /** Among the result's images. */
+  index: number;
+}
+
 const IMAGE_EXTENSIONS: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
 const TYPING_INTERVAL_MS = 3_000;
 /** Images handed to the agent with one batch of posts; any more are only named. */
@@ -160,7 +173,11 @@ class Thread {
   readonly #jobs: ScheduledJob[] = [];
   /** Images the agent generated in the current run, as the image model returned them, posted with its reply. */
   readonly #generated: { name: string; image: ImageContent }[] = [];
-  readonly #imageStore: ImageStore = { add: (image) => this.#addImage(image), get: (refs) => this.#images(refs) };
+  readonly #imageStore: ImageStore = {
+    add: (image) => this.#addImage(image),
+    addFetched: (toolCallId, index, mimeType) => this.#addFetched(toolCallId, index, mimeType),
+    get: (refs) => this.#images(refs),
+  };
   /** Whether the current run may call tools. */
   #allowed = false;
   #idleTimer: NodeJS.Timeout | undefined;
@@ -336,22 +353,32 @@ class Thread {
 
   /** Keeps an image the agent generated for this run's reply, under a name new to the thread. */
   #addImage(image: ImageContent): string {
-    const { sessionManager } = this.#session!;
-    const name = `image-${generatedImages(this.#session!).size + 1}.${IMAGE_EXTENSIONS[image.mimeType] ?? 'png'}`;
-    sessionManager.appendCustomEntry(GENERATED_ENTRY, { name, mimeType: image.mimeType } satisfies GeneratedEntry);
+    const session = this.#session!;
+    const name = `image-${namedImages(session, GENERATED_ENTRY).size + 1}.${IMAGE_EXTENSIONS[image.mimeType] ?? 'png'}`;
+    session.sessionManager.appendCustomEntry(GENERATED_ENTRY, { name, mimeType: image.mimeType } satisfies GeneratedEntry);
     this.#generated.push({ name, image });
+    return name;
+  }
+
+  /** Names an image another tool returned, with a name new to the thread. */
+  #addFetched(toolCallId: string, index: number, mimeType: string): string {
+    const session = this.#session!;
+    const name = `fetched-${namedImages(session, FETCHED_ENTRY).size + 1}.${IMAGE_EXTENSIONS[mimeType] ?? 'png'}`;
+    session.sessionManager.appendCustomEntry(FETCHED_ENTRY, { name, toolCallId, index } satisfies FetchedEntry);
     return name;
   }
 
   /**
    * The images `refs` name, for generate_image: this run's generated ones as the image model returned
-   * them, earlier ones from their posts, and the thread's posted ones by file id. Only the thread's,
-   * so a reference can't reach files in other channels.
+   * them, earlier ones from their posts, fetched ones from their tool results as pi stored them, and the
+   * thread's posted ones by file id. Only the thread's, so a reference can't reach files in other channels.
    */
   async #images(refs: string[]): Promise<ImageContent[]> {
     const { chat } = this.threads;
-    const generated = generatedImages(this.#session!);
-    const posted = refs.some((ref) => !generated.has(ref))
+    const session = this.#session!;
+    const generated = namedImages<GeneratedEntry>(session, GENERATED_ENTRY);
+    const fetched = namedImages<FetchedEntry>(session, FETCHED_ENTRY);
+    const posted = refs.some((ref) => !generated.has(ref) && !fetched.has(ref))
       ? new Map((await chat.threadPosts(this.rootId)).flatMap((p) => p.files).map((f) => [f.id, f]))
       : new Map<string, PostFile>();
     return Promise.all(
@@ -363,9 +390,17 @@ class Thread {
           if (!earlier.fileId) throw new Error(`${ref} was never posted, so it can't be used`);
           return { type: 'image', data: Buffer.from(await chat.file(earlier.fileId, false)).toString('base64'), mimeType: earlier.mimeType };
         }
+        const result = fetched.get(ref);
+        if (result) {
+          const image = toolResultImage(session, result);
+          if (!image) throw new Error(`${ref} is no longer in this thread's history, so it can't be used`);
+          return image;
+        }
         const file = posted.get(ref);
         if (!file?.mimeType.startsWith('image/')) {
-          throw new Error(`${ref} is not an image posted in this thread: give the file id from an [image] line, or the name of an image you generated`);
+          throw new Error(
+            `${ref} is not an image posted in this thread: give the file id from an [image] line, or the name of an image you generated or a tool returned`,
+          );
         }
         const source = imageSource(file);
         if (!source) throw new Error(`${file.name} (${ref}) is too large, or in a format that can't be used`);
@@ -471,16 +506,29 @@ export function trailingModel(message: string): { message: string; ref: string }
   return { message: message.slice(0, match.index).trimEnd(), ref: match[1]! };
 }
 
-/** The images the agent generated in the session, by name. */
-function generatedImages(session: AgentSession): Map<string, GeneratedEntry> {
-  const images = new Map<string, GeneratedEntry>();
+/** The images recorded in the session's `customType` entries, by name, the latest entry for each. */
+function namedImages<T extends { name: string }>(session: AgentSession, customType: string): Map<string, T> {
+  const images = new Map<string, T>();
   for (const entry of session.sessionManager.getEntries()) {
-    if (entry.type === 'custom' && entry.customType === GENERATED_ENTRY) {
-      const image = entry.data as GeneratedEntry;
+    if (entry.type === 'custom' && entry.customType === customType) {
+      const image = entry.data as T;
       images.set(image.name, image);
     }
   }
   return images;
+}
+
+/**
+ * A fetched image, from its tool result in the session. That's pi's copy, scaled down to the model's
+ * limits. Undefined when the result isn't in the session any more.
+ */
+function toolResultImage(session: AgentSession, { toolCallId, index }: FetchedEntry): ImageContent | undefined {
+  for (const entry of session.sessionManager.getEntries()) {
+    if (entry.type === 'message' && entry.message.role === 'toolResult' && entry.message.toolCallId === toolCallId) {
+      return entry.message.content.filter((c): c is ImageContent => c.type === 'image')[index];
+    }
+  }
+  return undefined;
 }
 
 /**

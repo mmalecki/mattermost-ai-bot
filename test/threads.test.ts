@@ -688,7 +688,7 @@ test("generate_image gets nothing from outside the thread, nor a generated image
   await threads.idle();
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'again')));
   await threads.idle();
-  const notInThread = 'is not an image posted in this thread: give the file id from an [image] line, or the name of an image you generated';
+  const notInThread = 'is not an image posted in this thread: give the file id from an [image] line, or the name of an image you generated or a tool returned';
   assert.deepEqual(errors, [
     `elsewhere ${notInThread}`,
     `f1 ${notInThread}`,
@@ -699,5 +699,27 @@ test("generate_image gets nothing from outside the thread, nor a generated image
     "image-1.png was never posted, so it can't be used",
   ]);
   assert.ok(!chat.downloads.some((d) => d.fileId === 'elsewhere'));
+  await threads.close();
+});
+
+test("generate_image gets fetched images from their tool results in the session, by name", async () => {
+  const fetched = { type: 'image' as const, data: 'ZmV0Y2hlZA==', mimeType: 'image/jpeg' };
+  let got: unknown[] = [];
+  let error = '';
+  const { chat, sessions, threads } = setup(async () => {
+    const { imageStore, entries } = sessions.get('r1')!;
+    // As pi stores webfetch's result, with the hook's note.
+    entries.push({ type: 'message', message: { role: 'toolResult', toolCallId: 'c1', content: [{ type: 'text', text: 'URL: x' }, FOX, fetched] } });
+    assert.equal(imageStore!.addFetched('c1', 1, 'image/jpeg'), 'fetched-1.jpg');
+    assert.equal(imageStore!.addFetched('c9', 0, 'image/png'), 'fetched-2.png');
+    got = await imageStore!.get(['fetched-1.jpg', 'f1']);
+    await imageStore!.get(['fetched-2.png']).catch((e: Error) => (error = e.message));
+    return 'ok';
+  }, ['maciej'], true, true);
+  chat.files.set('f1', new Uint8Array([1]));
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'combine', [image('f1', 'garage.png')]), { id: 'r1', direct: true }));
+  await threads.idle();
+  assert.deepEqual(got, [fetched, { type: 'image', data: 'AQ==', mimeType: 'image/png' }]);
+  assert.equal(error, "fetched-2.png is no longer in this thread's history, so it can't be used");
   await threads.close();
 });

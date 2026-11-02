@@ -63,8 +63,10 @@ function imageTool(result: Partial<AssistantImages>, model = PAINTER, stored: Re
     },
   };
   const added: ImageContent[] = [];
+  const fetched: unknown[] = [];
   const store: ImageStore = {
     add: (image) => `image-${added.push(image)}.png`,
+    addFetched: (toolCallId, index, mimeType) => `fetched-${fetched.push({ toolCallId, index, mimeType })}`,
     async get(refs) {
       return refs.map((ref) => {
         if (!stored[ref]) throw new Error(`no ${ref}`);
@@ -73,10 +75,16 @@ function imageTool(result: Partial<AssistantImages>, model = PAINTER, stored: Re
     },
   };
   let tool!: ToolDefinition;
-  const pi = { registerTool: (t: ToolDefinition) => (tool = t) };
+  let onToolResult: ((event: object) => unknown) | undefined;
+  const pi = {
+    registerTool: (t: ToolDefinition) => (tool = t),
+    on: (event: string, handler: (event: object) => unknown) => {
+      if (event === 'tool_result') onToolResult = handler;
+    },
+  };
   imageGeneration(models, model, store)(pi as unknown as ExtensionAPI);
   const run = (params: { prompt: string; images?: string[] }) => tool.execute('t1', params, undefined, undefined, {} as never);
-  return { calls, added, tool, run };
+  return { calls, added, fetched, tool, run, onToolResult };
 }
 
 const PNG = { type: 'image' as const, data: 'cG5n', mimeType: 'image/png' };
@@ -120,4 +128,27 @@ test('generate_image takes images to change only when its model takes images', a
   const missing = imageTool({ output: [PNG] }, EDITOR);
   await assert.rejects(missing.run({ prompt: 'darker', images: ['f9'] }), /no f9/);
   assert.deepEqual(missing.calls, []);
+});
+
+test("other tools' images are named in their results, when the image model takes images", () => {
+  const { fetched, onToolResult } = imageTool({}, EDITOR);
+  const result = { toolName: 'webfetch', toolCallId: 'c1', content: [{ type: 'text', text: 'URL: x' }, PNG, WEBP], details: { url: 'x' }, structuredContent: { a: 1 }, usage: { input: 1 }, isError: false };
+  assert.deepEqual(onToolResult!(result), {
+    content: [...result.content, { type: 'text', text: 'Saved as fetched-1, fetched-2, which you can pass to generate_image.' }],
+    details: { url: 'x' },
+    structuredContent: { a: 1 },
+    usage: { input: 1 },
+  });
+  assert.deepEqual(fetched, [
+    { toolCallId: 'c1', index: 0, mimeType: 'image/png' },
+    { toolCallId: 'c1', index: 1, mimeType: 'image/webp' },
+  ]);
+
+  // Not generate_image's own, a nested call's, nor a result without images.
+  assert.equal(onToolResult!({ ...result, toolName: 'generate_image' }), undefined);
+  assert.equal(onToolResult!({ ...result, toolCallId: 'c2/1', parentToolCallId: 'c2' }), undefined);
+  assert.equal(onToolResult!({ ...result, content: [{ type: 'text', text: 'hi' }] }), undefined);
+  assert.equal(fetched.length, 2);
+
+  assert.equal(imageTool({}).onToolResult, undefined);
 });
