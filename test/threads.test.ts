@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { ImageContent } from '@earendil-works/pi-ai';
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import type { Agent } from '../src/agent.ts';
 import type { ScheduledJob } from '../src/scheduler.ts';
@@ -27,6 +28,16 @@ class FakeChat implements Chat {
   async threadPosts(rootId: string) {
     return [...(this.posts.get(rootId) ?? [])];
   }
+  /** Files' contents by id; any other fails to download. */
+  files = new Map<string, Uint8Array>();
+  downloads: { fileId: string; preview: boolean }[] = [];
+
+  async file(fileId: string, preview: boolean) {
+    this.downloads.push({ fileId, preview });
+    const bytes = this.files.get(fileId);
+    if (!bytes) throw new Error(`no file ${fileId}`);
+    return bytes;
+  }
   /** Users whose lookups fail, as for one deleted since. */
   gone = new Set<string>();
 
@@ -45,6 +56,7 @@ type Answer = (prompt: string) => Promise<Reply> | Reply;
 
 interface FakeSession {
   prompts: string[];
+  images: ImageContent[][];
   allowed: boolean[];
   entries: unknown[];
   onScheduled: ((job: ScheduledJob) => void) | undefined;
@@ -55,13 +67,14 @@ interface FakeSession {
  * An agent whose sessions answer each prompt with `answer(prompt)`, fail when it throws, and add no
  * message for `null`. An answer may give its stop reason.
  */
-function fakeAgent(answer: Answer = () => 'ok') {
+function fakeAgent(answer: Answer = () => 'ok', images = true) {
   const sessions = new Map<string, FakeSession>();
   const agent: Agent = {
+    images,
     hasSession: (rootId) => sessions.has(rootId),
     async openSession(rootId, { allowTools, onScheduled }) {
       const entries: unknown[] = [];
-      const record: FakeSession = { prompts: [], allowed: [], entries, onScheduled, closed: false };
+      const record: FakeSession = { prompts: [], images: [], allowed: [], entries, onScheduled, closed: false };
       sessions.set(rootId, record);
       const messages: unknown[] = [];
       const session = {
@@ -70,8 +83,9 @@ function fakeAgent(answer: Answer = () => 'ok') {
           appendCustomEntry: (customType: string, data: unknown) => entries.push({ type: 'custom', customType, data }),
         },
         messages,
-        async prompt(text: string) {
+        async prompt(text: string, options?: { images?: ImageContent[] }) {
           record.prompts.push(text);
+          record.images.push(options?.images ?? []);
           record.allowed.push(allowTools('websearch'));
           try {
             const timestamp = Date.now();
@@ -93,10 +107,10 @@ function fakeAgent(answer: Answer = () => 'ok') {
   return { agent, sessions };
 }
 
-/** `null` leaves out the allowlist. */
-function setup(answer?: Answer, allowlist: string[] | null = ['maciej']) {
+/** `null` leaves out the allowlist. `images` is whether the model takes them. */
+function setup(answer?: Answer, allowlist: string[] | null = ['maciej'], images = true) {
   const chat = new FakeChat();
-  const { agent, sessions } = fakeAgent(answer);
+  const { agent, sessions } = fakeAgent(answer, images);
   const threads = new Threads(agent, chat, { botUserId: BOT, allowedUsers: allowlist ? new Set(allowlist) : undefined, idleMs: 60_000 });
   return { chat, sessions, threads };
 }
@@ -166,6 +180,79 @@ test("a post's files are named, so one with only a file isn't empty", async () =
   threads.handle(incoming('r1', chat.add('r1', 'u1', '', [pdf]), { id: 'r1', direct: true }));
   await threads.idle();
   assert.match(sessions.get('r1')!.prompts[0]!, /^@maciej \(.+\): \[file: invoice\.pdf \(application\/pdf\), which you can't open\]$/);
+  await threads.close();
+});
+
+function image(id: string, name: string, extra: Partial<PostFile> = {}): PostFile {
+  return { id, name, mimeType: 'image/png', size: 1000, hasPreview: true, ...extra };
+}
+
+test('images are handed to the agent after the text, in the order of their lines', async () => {
+  const { chat, sessions, threads } = setup();
+  chat.files.set('f1', new Uint8Array([1])).set('f2', new Uint8Array([2]));
+  chat.add('r1', 'u1', 'look', [image('f1', 'garage.png')]);
+  threads.handle(incoming('r1', chat.add('r1', 'u2', '', [image('f2', 'gate.jpg', { mimeType: 'image/jpeg' })]), { mentioned: true }));
+  await threads.idle();
+  const session = sessions.get('r1')!;
+  assert.match(session.prompts[0]!, /: look\n\[image 1: garage\.png\]\n\n@guest .*: \[image 2: gate\.jpg\]$/);
+  assert.deepEqual(session.images[0], [
+    { type: 'image', data: 'AQ==', mimeType: 'image/png' },
+    { type: 'image', data: 'Ag==', mimeType: 'image/jpeg' },
+  ]);
+  await threads.close();
+});
+
+test("large images, and those in other formats, are handed over as the server's preview", async () => {
+  const { chat, sessions, threads } = setup();
+  chat.files.set('f1', new Uint8Array([1])).set('f2', new Uint8Array([2]));
+  const files = [
+    image('f1', 'huge.png', { size: 50 * 1024 * 1024 }),
+    image('f2', 'scan.tiff', { mimeType: 'image/tiff' }),
+    image('f3', 'odd.heic', { mimeType: 'image/heic', hasPreview: false }),
+  ];
+  threads.handle(incoming('r1', chat.add('r1', 'u1', '', files), { id: 'r1', direct: true }));
+  await threads.idle();
+  assert.deepEqual(chat.downloads, [
+    { fileId: 'f1', preview: true },
+    { fileId: 'f2', preview: true },
+  ]);
+  const session = sessions.get('r1')!;
+  assert.deepEqual(session.images[0]!.map((i) => i.mimeType), ['image/jpeg', 'image/jpeg']);
+  assert.match(session.prompts[0]!, /\[image: odd\.heic, not shown: too large, or in a format you can't see\]$/);
+  await threads.close();
+});
+
+test("an image that can't be downloaded is only named, and the posts still answered", async () => {
+  const { chat, sessions, threads } = setup();
+  chat.files.set('f2', new Uint8Array([2]));
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'hm', [image('f1', 'gone.png'), image('f2', 'here.png')]), { id: 'r1', direct: true }));
+  await threads.idle();
+  const session = sessions.get('r1')!;
+  assert.match(session.prompts[0]!, /\[image: gone\.png, not shown: it couldn't be downloaded\]\n\[image 1: here\.png\]$/);
+  assert.equal(session.images[0]!.length, 1);
+  assert.deepEqual(chat.replies.map((r) => r.message), ['ok']);
+  await threads.close();
+});
+
+test('images past the limit for one batch of posts are only named', async () => {
+  const { chat, sessions, threads } = setup();
+  const files = Array.from({ length: 10 }, (_, i) => image(`f${i}`, `${i}.png`));
+  for (const file of files) chat.files.set(file.id, new Uint8Array([1]));
+  threads.handle(incoming('r1', chat.add('r1', 'u1', '', files), { id: 'r1', direct: true }));
+  await threads.idle();
+  const session = sessions.get('r1')!;
+  assert.equal(session.images[0]!.length, 8);
+  assert.match(session.prompts[0]!, /\[image 8: 7\.png\]\n\[image: 8\.png, not shown: too many images at once\]\n/);
+  await threads.close();
+});
+
+test("a model that doesn't take images gets their names only", async () => {
+  const { chat, sessions, threads } = setup(undefined, ['maciej'], false);
+  chat.files.set('f1', new Uint8Array([1]));
+  threads.handle(incoming('r1', chat.add('r1', 'u1', '', [image('f1', 'garage.png')]), { id: 'r1', direct: true }));
+  await threads.idle();
+  assert.equal(chat.downloads.length, 0);
+  assert.match(sessions.get('r1')!.prompts[0]!, /: \[file: garage\.png \(image\/png\), which you can't open\]$/);
   await threads.close();
 });
 

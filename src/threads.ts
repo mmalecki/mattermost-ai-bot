@@ -1,4 +1,4 @@
-import type { AssistantMessage } from '@earendil-works/pi-ai';
+import type { AssistantMessage, ImageContent } from '@earendil-works/pi-ai';
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import type { Agent } from './agent.ts';
 import { pendingJobs, type ScheduledJob } from './scheduler.ts';
@@ -26,6 +26,8 @@ export interface PostFile {
 export interface Chat {
   /** The thread's posts, oldest first, without the bot's own and system posts. */
   threadPosts(rootId: string): Promise<ThreadPost[]>;
+  /** A file's contents, or with `preview`, the server's smaller JPEG of an image. */
+  file(fileId: string, preview: boolean): Promise<Uint8Array>;
   username(userId: string): Promise<string>;
   reply(channelId: string, rootId: string, message: string): Promise<void>;
   typing(channelId: string, rootId: string): void;
@@ -60,6 +62,14 @@ interface SeenEntry {
   userIds?: string[];
 }
 const TYPING_INTERVAL_MS = 3_000;
+/** Images handed to the agent with one batch of posts; any more are only named. */
+const MAX_IMAGES = 8;
+/**
+ * Larger images, and those in other formats, are handed over as the server's preview, or only named
+ * without one. pi scales them all down to the model's limits.
+ */
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
 /**
  * One agent session per thread. Threads start with a DM or a mention of the bot, and from then on
@@ -207,8 +217,40 @@ class Thread {
     session.sessionManager.appendCustomEntry(SEEN_ENTRY, seen);
 
     console.log(`Thread ${this.rootId}: ${posts.length} new post(s) from ${[...new Set(names)].join(', ')}`);
-    const attachments = posts.map((p) => p.files.map(fileLine));
-    await this.#answer(session, formatPosts(posts, names, attachments));
+    const { lines, images } = await this.#attachments(posts);
+    await this.#answer(session, formatPosts(posts, names, lines), images);
+  }
+
+  /**
+   * The posts' files: lines naming each, and the images the model can see, in the order of their
+   * lines. A file that can't be handed over is only named, so answering doesn't fail on it.
+   */
+  async #attachments(posts: ThreadPost[]): Promise<{ lines: string[][]; images: ImageContent[] }> {
+    const images: ImageContent[] = [];
+    const lines: string[][] = [];
+    for (const post of posts) {
+      const postLines: string[] = [];
+      for (const file of post.files) {
+        postLines.push(this.threads.agent.images && file.mimeType.startsWith('image/') ? await this.#image(file, images) : fileLine(file));
+      }
+      lines.push(postLines);
+    }
+    return { lines, images };
+  }
+
+  /** Adds the image to `images`, and returns its line. */
+  async #image(file: PostFile, images: ImageContent[]): Promise<string> {
+    if (images.length >= MAX_IMAGES) return `[image: ${file.name}, not shown: too many images at once]`;
+    const original = IMAGE_TYPES.has(file.mimeType) && file.size <= MAX_IMAGE_BYTES;
+    if (!original && !file.hasPreview) return `[image: ${file.name}, not shown: too large, or in a format you can't see]`;
+    try {
+      const bytes = await this.threads.chat.file(file.id, !original);
+      images.push({ type: 'image', data: Buffer.from(bytes).toString('base64'), mimeType: original ? file.mimeType : 'image/jpeg' });
+      return `[image ${images.length}: ${file.name}]`;
+    } catch (error) {
+      console.warn(`Thread ${this.rootId}: image ${file.id} couldn't be downloaded:`, errorMessage(error));
+      return `[image: ${file.name}, not shown: it couldn't be downloaded]`;
+    }
   }
 
   async #runJob(session: AgentSession, job: ScheduledJob): Promise<void> {
@@ -231,9 +273,9 @@ class Thread {
     return names.every((name) => name !== undefined && allowedUsers.has(name));
   }
 
-  async #answer(session: AgentSession, prompt: string): Promise<void> {
+  async #answer(session: AgentSession, prompt: string, images: ImageContent[] = []): Promise<void> {
     const startedAt = Date.now();
-    await session.prompt(prompt, { expandPromptTemplates: false });
+    await session.prompt(prompt, { expandPromptTemplates: false, images });
     const reply = replyText(session, startedAt);
     // pi drops an answer cut off at the output limit to compact and retry, and the retry may not happen.
     if (reply === NO_ANSWER) console.warn(`Thread ${this.rootId}: the run added no answer`);

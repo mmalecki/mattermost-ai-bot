@@ -22,6 +22,8 @@ import { mcpServers, toolGuard, withoutCwd } from './tools.ts';
 const FEATHER_PI_WEB = dirname(fileURLToPath(import.meta.resolve('@mmalecki/feather-pi-web/package.json')));
 
 export interface Agent {
+  /** Whether the model takes images. */
+  readonly images: boolean;
   /** Whether the thread has a session from an earlier run. */
   hasSession(rootId: string): boolean;
   /**
@@ -52,7 +54,8 @@ export async function createAgent(config: Config, botUsername: string): Promise<
     throw new Error(`No API key for ${llm.provider}: set its variable, such as ${llm.provider.toUpperCase().replace(/-/g, '_')}_API_KEY`);
   }
   const model = { ...found, maxTokens: Math.min(found.maxTokens, llm.maxTokens) };
-  console.log(`Model: ${llm.provider}/${llm.model} (${model.api}, thinking ${llm.thinkingLevel}, max ${model.maxTokens} tokens)`);
+  const images = model.input.includes('image');
+  console.log(`Model: ${llm.provider}/${llm.model} (${model.api}, thinking ${llm.thinkingLevel}, max ${model.maxTokens} tokens${images ? ', images' : ''})`);
 
   const schedulerExtension = config.scheduler ? await loadScheduler() : undefined;
   if (schedulerExtension) console.log('Scheduler: on');
@@ -70,6 +73,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
   }
 
   return {
+    images,
     hasSession: (rootId) => existsSync(sessionFile(rootId)),
 
     async openSession(rootId, { allowTools, onScheduled }) {
@@ -137,6 +141,7 @@ export function buildSystemPrompt(botUsername: string, servers: Record<string, M
   return [
     `You are @${botUsername}, a Mattermost bot that gets things done with your tools.`,
     'Each user message holds one or more Mattermost posts from a thread, as "@username (time, post <id>): text". Several people can take part in one thread.',
+    'The files attached to a post are listed after its text. Images you can see are "[image <n>: name]", and come at the end of the message, in that order.',
     `This thread's link is ${permalink(serverUrl, rootId)}, and a post's is ${permalink(serverUrl, '<id>')}: use them to point to the thread or a post in it.`,
     'Your reply is posted to the thread as Mattermost markdown.',
     'What you change happens in the real world. Look before you change anything: get the current state first, and only change things in a later step, once you have seen it. Never send a change in the same batch as the look.',

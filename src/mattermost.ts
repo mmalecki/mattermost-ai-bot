@@ -115,6 +115,13 @@ export class Mattermost implements Chat {
       .map((p) => ({ id: p.id, userId: p.user_id, createAt: p.create_at, message: p.message, files: (p.metadata?.files ?? []).map(toFile) }));
   }
 
+  async file(fileId: string, preview: boolean): Promise<Uint8Array> {
+    const url = `${this.#client.getFileRoute(fileId)}${preview ? '/preview' : ''}`;
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${this.#token}` } });
+    if (!response.ok) throw new Error(`${url}: ${response.status} ${response.statusText}`);
+    return new Uint8Array(await response.arrayBuffer());
+  }
+
   username(userId: string): Promise<string> {
     let name = this.#usernames.get(userId);
     if (!name) {
