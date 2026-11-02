@@ -115,6 +115,8 @@ test('generate_image takes images to change only when its model takes images', a
   await editor.run({ prompt: 'put the fox in the garage', images: ['image-1.png', 'f1'] });
   assert.deepEqual(editor.calls, [{ model: EDITOR, context: { input: [{ type: 'text', text: 'put the fox in the garage' }, PNG, WEBP] } }]);
 
+  assert.deepEqual(editor.tool.prepareArguments!({ prompt: 'darker', images: 'f1' }), { prompt: 'darker', images: ['f1'] });
+
   const missing = imageTool({ output: [PNG] }, EDITOR);
   await assert.rejects(missing.run({ prompt: 'darker', images: ['f9'] }), /no f9/);
   assert.deepEqual(missing.calls, []);

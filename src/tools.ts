@@ -83,6 +83,11 @@ export function imageGeneration(models: Pick<ModelRuntime, 'generateImages'>, mo
             : {}),
         }),
         annotations: { openWorldHint: true },
+        // Small models often send a single image as a string. Validation follows.
+        prepareArguments(args) {
+          const input = args as { images?: unknown };
+          return (typeof input?.images === 'string' ? { ...input, images: [input.images] } : input) as never;
+        },
 
         async execute(_toolCallId, params, signal) {
           const { prompt, images: refs = [] } = params as { prompt: string; images?: string[] };
