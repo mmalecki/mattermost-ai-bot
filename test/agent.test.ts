@@ -15,13 +15,14 @@ test("lists what directly exposed servers offer, in the format of pi's mcp_serve
   assert.deepEqual(directServers({}), []);
 });
 
+const promptOptions = { botUsername: 'sailor', servers: {}, scheduler: false, images: false, serverUrl: 'https://chat.example', rootId: 'r1' };
+
 test('links posts without their team, and gives the model the thread\'s link', () => {
   assert.equal(permalink('https://chat.example', 'p1'), 'https://chat.example/_redirect/pl/p1');
-  const prompt = buildSystemPrompt('sailor', {}, false, false, 'https://chat.example', 'r1');
-  assert.match(prompt, /This thread's link is https:\/\/chat\.example\/_redirect\/pl\/r1, and a post's is https:\/\/chat\.example\/_redirect\/pl\/<id>/);
+  assert.match(buildSystemPrompt(promptOptions), /This thread's link is https:\/\/chat\.example\/_redirect\/pl\/r1, and a post's is https:\/\/chat\.example\/_redirect\/pl\/<id>/);
 });
 
 test('tells the model how images come only when it takes them', () => {
-  assert.match(buildSystemPrompt('sailor', {}, false, true, 'https://chat.example', 'r1'), /\[image <n>: name\]/);
-  assert.doesNotMatch(buildSystemPrompt('sailor', {}, false, false, 'https://chat.example', 'r1'), /\[image/);
+  assert.match(buildSystemPrompt({ ...promptOptions, images: true }), /\[image <n>: name\]/);
+  assert.doesNotMatch(buildSystemPrompt(promptOptions), /\[image/);
 });
