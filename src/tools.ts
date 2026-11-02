@@ -1,4 +1,5 @@
 import type { ExtensionFactory, McpServerConfig } from '@earendil-works/pi-coding-agent';
+import { errorMessage } from './error.ts';
 
 const BLOCKED = 'Tools are off in this thread: someone who has posted in it is not allowed to use them.';
 
@@ -12,7 +13,7 @@ export function mcpServers(servers: Record<string, McpServerConfig>): ExtensionF
       try {
         pi.registerMcpServer(name, config);
       } catch (error) {
-        console.error(`MCP server "${name}" skipped:`, error instanceof Error ? error.message : error);
+        console.error(`MCP server "${name}" skipped: ${errorMessage(error)}`);
       }
     }
   };
