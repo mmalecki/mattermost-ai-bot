@@ -9,6 +9,8 @@ A less full-featured alternative to [Mattermost Agents plugin](https://github.co
 Set in `.env`:
 
 * `MATTERMOST_URL`, `MATTERMOST_TOKEN` - Mattermost server and [bot token](https://developers.mattermost.com/integrate/reference/bot-accounts/)
+* `MATTERMOST_PUBLIC_URL` - where people open Mattermost, for the links the agent gives, if not `MATTERMOST_URL`, such
+  as when the bot reaches the server at an internal address
 * `MODEL` - the model, as `provider/model[:thinking]` like Pi's `--model`, for example
   `mistral/mistral-small-2603` or `anthropic/claude-haiku-5-5:low`. 
   [Pi handles provider and model quirks](https://pi.dev/docs/latest/providers).
@@ -47,7 +49,7 @@ identity, purpose, for example "You are Sailor, you look after our home through 
 Refreshed live for new sessions, and after a session idles out for existing ones.
 
 The agent also gets the thread's permalink, and each post's id, so it can link the thread or a post in it, for
-example in a note it saves somewhere with a tool. Links take the `MATTERMOST_URL/_redirect/pl/<post id>` form.
+example in a note it saves somewhere with a tool. Links take the `MATTERMOST_PUBLIC_URL/_redirect/pl/<post id>` form.
 
 ### Tools
 `mcp.json` uses [Pi's MCP configuration format](https://pi.dev/docs/latest/mcp), with one addition: `allowedUsers`, the

@@ -94,7 +94,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
         noPromptTemplates: true,
         noThemes: true,
         noContextFiles: true,
-        systemPrompt: buildSystemPrompt(botUsername, config.tools.mcpServers, !!schedulerExtension, config.mattermost.url, rootId),
+        systemPrompt: buildSystemPrompt(botUsername, config.tools.mcpServers, !!schedulerExtension, config.mattermost.publicUrl, rootId),
         // Read on every session open, so edits reach new threads. pi would take a missing path as
         // the text itself, and would look for its own APPEND_SYSTEM.md without an explicit list.
         appendSystemPrompt: existsSync(config.appendSystemPromptPath) ? [config.appendSystemPromptPath] : [],

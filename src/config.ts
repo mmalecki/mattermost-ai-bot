@@ -3,7 +3,8 @@ import { dirname, join, resolve } from 'node:path';
 import type { CreateAgentSessionOptions, McpServerConfig } from '@earendil-works/pi-coding-agent';
 
 export interface Config {
-  mattermost: { url: string; token: string };
+  /** `publicUrl` is where people open the server, for links: `url` may be one only the bot reaches. */
+  mattermost: { url: string; publicUrl: string; token: string };
   llm: {
     /** A pi provider: built in, such as `mistral` or `anthropic`, or defined in `modelsPath`. */
     provider: string;
@@ -51,8 +52,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   };
 
   const mcpConfig = resolve(env.MCP_CONFIG || 'mcp.json');
+  const url = trimSlash(required('MATTERMOST_URL'));
   return {
-    mattermost: { url: trimSlash(required('MATTERMOST_URL')), token: required('MATTERMOST_TOKEN') },
+    mattermost: { url, publicUrl: env.MATTERMOST_PUBLIC_URL?.trim() ? trimSlash(env.MATTERMOST_PUBLIC_URL.trim()) : url, token: required('MATTERMOST_TOKEN') },
     llm: {
       ...parseModel(required('MODEL')),
       // Low enough that a model stuck repeating itself stops soon; reasoning counts towards it.

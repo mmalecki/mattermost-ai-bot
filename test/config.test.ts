@@ -17,6 +17,8 @@ test('MODEL picks a pi provider and model; models.json sits next to the MCP conf
     modelsPath: join(process.cwd(), 'models.json'),
   });
   assert.equal(mattermost.url, 'http://mm.local');
+  assert.equal(mattermost.publicUrl, 'http://mm.local');
+  assert.equal(loadConfig({ ...base, MATTERMOST_PUBLIC_URL: 'https://chat.example/' }).mattermost.publicUrl, 'https://chat.example');
   assert.throws(() => loadConfig({ ...base, MODEL: undefined }), /MODEL is not set/);
 });
 
