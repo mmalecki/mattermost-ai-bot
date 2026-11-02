@@ -59,8 +59,8 @@ const SEEN_ENTRY = 'mattermost';
 interface SeenEntry {
   /** The newest post's. */
   createAt: number;
-  /** The posts' authors. Missing from sessions older than it. */
-  userIds?: string[];
+  /** The posts' authors. */
+  userIds: string[];
 }
 const TYPING_INTERVAL_MS = 3_000;
 /** Images handed to the agent with one batch of posts; any more are only named. */
@@ -315,7 +315,7 @@ function seenPosts(session: AgentSession): Seen {
     if (entry.type !== 'custom' || entry.customType !== SEEN_ENTRY) continue;
     const seen = entry.data as SeenEntry;
     createAt = Math.max(createAt, seen.createAt);
-    for (const id of seen.userIds ?? []) userIds.add(id);
+    for (const id of seen.userIds) userIds.add(id);
   }
   return { createAt, userIds };
 }
