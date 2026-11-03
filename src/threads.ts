@@ -1,6 +1,7 @@
 import type { AssistantMessage, ImageContent } from '@earendil-works/pi-ai';
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import type { Agent } from './agent.ts';
+import type { ModelChoice } from './config.ts';
 import { errorMessage } from './error.ts';
 import { pendingJobs, type ScheduledJob } from './scheduler.ts';
 import type { GeneratedImage } from './tools.ts';
@@ -61,6 +62,8 @@ export interface ThreadsOptions {
   allowedUsers: Set<string> | undefined;
   /** Idle sessions are closed after this long, and reopened from their file on the next post. */
   idleMs: number;
+  /** Whether the post that starts a thread may pick its model, with a trailing `/model provider/model[:thinking]`. */
+  pickModel: boolean;
 }
 
 /** Session entry recording the posts handed to the agent. Not part of the model's context. */
@@ -108,7 +111,7 @@ export class Threads {
 
     let thread = this.#threads.get(rootId);
     if (!thread) {
-      thread = new Thread(this, post.channelId, rootId, () => this.#threads.delete(rootId));
+      thread = new Thread(this, post.channelId, rootId, post.id, () => this.#threads.delete(rootId));
       this.#threads.set(rootId, thread);
     }
     thread.wake();
@@ -132,6 +135,8 @@ class Thread {
   readonly threads: Threads;
   readonly channelId: string;
   readonly rootId: string;
+  /** The post that brought the bot in, which may pick the thread's model. */
+  readonly firstPostId: string;
   readonly onClose: () => void;
   running: Promise<void> | undefined;
   #session: AgentSession | undefined;
@@ -145,10 +150,11 @@ class Thread {
   #idleTimer: NodeJS.Timeout | undefined;
   #closed = false;
 
-  constructor(threads: Threads, channelId: string, rootId: string, onClose: () => void) {
+  constructor(threads: Threads, channelId: string, rootId: string, firstPostId: string, onClose: () => void) {
     this.threads = threads;
     this.channelId = channelId;
     this.rootId = rootId;
+    this.firstPostId = firstPostId;
     this.onClose = onClose;
   }
 
@@ -189,7 +195,7 @@ class Thread {
   }
 
   async #run(): Promise<void> {
-    const { agent, chat } = this.threads;
+    const { chat } = this.threads;
     clearTimeout(this.#idleTimer);
     chat.typing(this.channelId, this.rootId);
     const typing = setInterval(() => chat.typing(this.channelId, this.rootId), TYPING_INTERVAL_MS);
@@ -198,12 +204,7 @@ class Thread {
         const job = this.#pending ? undefined : this.#jobs.shift();
         this.#pending = false;
         try {
-          const session = (this.#session ??= await agent.openSession(this.rootId, {
-            allowTools: () => this.#allowed,
-            onScheduled: (due) => this.due(due),
-            onImage: (image) => this.#generated.push(image),
-          }));
-          await (job ? this.#runJob(session, job) : this.#answerPosts(session));
+          await (job ? this.#runJob(await this.#open(), job) : this.#answerPosts());
         } catch (error) {
           console.error(`Thread ${this.rootId} failed:`, error);
           await chat.reply(this.channelId, this.rootId, `Sorry, something went wrong: ${errorMessage(error)}`).catch(() => {});
@@ -214,13 +215,37 @@ class Thread {
     }
   }
 
-  async #answerPosts(session: AgentSession): Promise<void> {
-    const { chat } = this.threads;
-    const seen = seenPosts(session);
+  /** The thread's session, opened on `model` if it is new. */
+  async #open(model?: ModelChoice): Promise<AgentSession> {
+    return (this.#session ??= await this.threads.agent.openSession(this.rootId, {
+      model,
+      allowTools: () => this.#allowed,
+      onScheduled: (due) => this.due(due),
+      onImage: (image) => this.#generated.push(image),
+    }));
+  }
+
+  async #answerPosts(): Promise<void> {
+    const { agent, chat } = this.threads;
+    // A new thread's posts may pick its model, so its session waits for them.
+    const isNew = !this.#session && !agent.hasSession(this.rootId);
+    const seen = isNew ? { createAt: 0, userIds: new Set<string>() } : seenPosts(await this.#open());
     const thread = await chat.threadPosts(this.rootId);
     const posts = thread.filter((p) => p.createAt > seen.createAt);
     const last = posts.at(-1);
     if (!last) return;
+    let model;
+    try {
+      model = isNew ? this.#pickModel(posts) : undefined;
+    } catch (error) {
+      // Without a session, the thread is new again once it closes: the next post that brings the bot
+      // in starts it afresh, and may pick another model.
+      this.#closed = true;
+      this.onClose();
+      await chat.reply(this.channelId, this.rootId, `Sorry, I can't run on that model: ${errorMessage(error)}`);
+      return;
+    }
+    const session = await this.#open(model);
 
     // A post's author may be one no longer looked up, deleted since: the id stands in for the
     // name, and #allowTools turns tools off for them instead. Answering must not fail: that
@@ -232,21 +257,37 @@ class Thread {
     session.sessionManager.appendCustomEntry(SEEN_ENTRY, entry);
 
     console.log(`Thread ${this.rootId}: ${posts.length} new post(s) from ${[...new Set(names)].join(', ')}`);
-    const { lines, images } = await this.#attachments(posts);
+    const { lines, images } = await this.#attachments(posts, !!session.model?.input.includes('image'));
     await this.#answer(session, formatPosts(posts, names, lines), images);
   }
 
   /**
-   * The posts' files: lines naming each, and the images the model can see, in the order of their
-   * lines. A file that can't be handed over is only named, so answering doesn't fail on it.
+   * The model the first post picks, with a trailing `/model provider/model[:thinking]` that is taken
+   * off it in `posts`. Throws for a model that can't run.
    */
-  async #attachments(posts: ThreadPost[]): Promise<{ lines: string[][]; images: ImageContent[] }> {
+  #pickModel(posts: ThreadPost[]): ModelChoice | undefined {
+    if (!this.threads.options.pickModel) return undefined;
+    const i = posts.findIndex((p) => p.id === this.firstPostId);
+    const picked = i >= 0 ? trailingModel(posts[i]!.message) : undefined;
+    if (!picked) return undefined;
+    const model = this.threads.agent.pickModel(picked.ref);
+    posts[i] = { ...posts[i]!, message: picked.message };
+    console.log(`Thread ${this.rootId}: runs on ${model.provider}/${model.model} (thinking ${model.thinkingLevel})`);
+    return model;
+  }
+
+  /**
+   * The posts' files: lines naming each, and the images the model can see, in the order of their
+   * lines, if it takes `images`. A file that can't be handed over is only named, so answering doesn't
+   * fail on it.
+   */
+  async #attachments(posts: ThreadPost[], takesImages: boolean): Promise<{ lines: string[][]; images: ImageContent[] }> {
     const images: ImageContent[] = [];
     const lines: string[][] = [];
     for (const post of posts) {
       const postLines: string[] = [];
       for (const file of post.files) {
-        postLines.push(this.threads.agent.images && file.mimeType.startsWith('image/') ? await this.#image(file, images) : fileLine(file));
+        postLines.push(takesImages && file.mimeType.startsWith('image/') ? await this.#image(file, images) : fileLine(file));
       }
       lines.push(postLines);
     }
@@ -346,6 +387,16 @@ const timeFormat = new Intl.DateTimeFormat('sv-SE', {
   minute: '2-digit',
   timeZoneName: 'shortOffset',
 });
+
+/**
+ * `message` without a trailing `/model <ref>`, and the ref. Whether it names a model is the agent's
+ * to say.
+ */
+export function trailingModel(message: string): { message: string; ref: string } | undefined {
+  const match = /(?:^|\s)\/model\s+(\S+)\s*$/.exec(message);
+  if (!match) return undefined;
+  return { message: message.slice(0, match.index).trimEnd(), ref: match[1]! };
+}
 
 /** A file the model only learns the name of. */
 function fileLine(file: PostFile): string {

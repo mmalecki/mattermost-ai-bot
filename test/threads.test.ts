@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import type { ImageContent } from '@earendil-works/pi-ai';
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import type { Agent } from '../src/agent.ts';
+import { type ModelChoice, parseModel } from '../src/config.ts';
 import type { ScheduledJob } from '../src/scheduler.ts';
 import { type Chat, type IncomingPost, type OutgoingFile, type PostFile, type ThreadPost, Threads } from '../src/threads.ts';
 import type { GeneratedImage } from '../src/tools.ts';
@@ -57,6 +58,8 @@ type Reply = string | { text: string; stopReason: string } | null;
 type Answer = (prompt: string) => Promise<Reply> | Reply;
 
 interface FakeSession {
+  /** What the session was opened on, if not MODEL. */
+  model: ModelChoice | undefined;
   prompts: string[];
   images: ImageContent[][];
   allowed: boolean[];
@@ -68,19 +71,24 @@ interface FakeSession {
 
 /**
  * An agent whose sessions answer each prompt with `answer(prompt)`, fail when it throws, and add no
- * message for `null`. An answer may give its stop reason.
+ * message for `null`. An answer may give its stop reason. Its models are every one but `missing`.
  */
 function fakeAgent(answer: Answer = () => 'ok', images = true) {
   const sessions = new Map<string, FakeSession>();
   const agent: Agent = {
-    images,
     hasSession: (rootId) => sessions.has(rootId),
-    async openSession(rootId, { allowTools, onScheduled, onImage }) {
+    pickModel(ref) {
+      const choice = parseModel(ref);
+      if (choice.model === 'missing') throw new Error(`there is no model ${choice.provider}/missing`);
+      return choice;
+    },
+    async openSession(rootId, { model, allowTools, onScheduled, onImage }) {
       const entries: unknown[] = [];
-      const record: FakeSession = { prompts: [], images: [], allowed: [], entries, onScheduled, onImage, closed: false };
+      const record: FakeSession = { model, prompts: [], images: [], allowed: [], entries, onScheduled, onImage, closed: false };
       sessions.set(rootId, record);
       const messages: unknown[] = [];
       const session = {
+        model: { input: images ? ['text', 'image'] : ['text'] },
         sessionManager: {
           getEntries: () => entries,
           appendCustomEntry: (customType: string, data: unknown) => entries.push({ type: 'custom', customType, data }),
@@ -111,10 +119,10 @@ function fakeAgent(answer: Answer = () => 'ok', images = true) {
 }
 
 /** `null` leaves out the allowlist. `images` is whether the model takes them. */
-function setup(answer?: Answer, allowlist: string[] | null = ['maciej'], images = true) {
+function setup(answer?: Answer, allowlist: string[] | null = ['maciej'], images = true, pickModel = false) {
   const chat = new FakeChat();
   const { agent, sessions } = fakeAgent(answer, images);
-  const threads = new Threads(agent, chat, { botUserId: BOT, allowedUsers: allowlist ? new Set(allowlist) : undefined, idleMs: 60_000 });
+  const threads = new Threads(agent, chat, { botUserId: BOT, allowedUsers: allowlist ? new Set(allowlist) : undefined, idleMs: 60_000, pickModel });
   return { chat, sessions, threads };
 }
 
@@ -532,5 +540,65 @@ test('generated images are posted without text, and with a run that fails', asyn
       ["Sorry, I couldn't finish: rate limited", ['image-1.png']],
     ],
   );
+  await threads.close();
+});
+
+// A root post's id is its thread's: incoming() gives p0 no root id.
+test('the post that starts a thread picks its model with a trailing /model, taken off it', async () => {
+  const { chat, sessions, threads } = setup(undefined, undefined, undefined, true);
+  threads.handle(incoming('p0', chat.add('p0', 'u1', 'draw a lighthouse /model anthropic/claude-opus-5-5:high'), { direct: true }));
+  await threads.idle();
+  const session = sessions.get('p0')!;
+  assert.deepEqual(session.model, { provider: 'anthropic', model: 'claude-opus-5-5', thinkingLevel: 'high' });
+  assert.match(session.prompts[0]!, /: draw a lighthouse$/);
+
+  // Later posts can't change it, and keep their /model.
+  threads.handle(incoming('p0', chat.add('p0', 'u1', 'again /model local/qwen')));
+  await threads.idle();
+  assert.equal(sessions.get('p0'), session);
+  assert.match(session.prompts[1]!, /: again \/model local\/qwen$/);
+  await threads.close();
+});
+
+test('in a thread the bot is brought into, the post that mentions it picks the model', async () => {
+  const { chat, sessions, threads } = setup(undefined, undefined, undefined, true);
+  chat.add('r1', 'u2', 'what about /model local/earlier');
+  threads.handle(incoming('r1', chat.add('r1', 'u1', '@sailor check /model local/qwen'), { mentioned: true }));
+  await threads.idle();
+  const session = sessions.get('r1')!;
+  assert.deepEqual(session.model, { provider: 'local', model: 'qwen', thinkingLevel: 'off' });
+  assert.match(session.prompts[0]!, /: what about \/model local\/earlier\n\n.*: @sailor check$/);
+  await threads.close();
+});
+
+test('/model picks nothing unless it ends the post with a model after it, or without ALLOW_PICKING_MODEL', async () => {
+  const { chat, sessions, threads } = setup(undefined, undefined, undefined, true);
+  for (const [i, text] of ['/model local/qwen and more', 'which /model', 'see /models local/qwen', 'see a/model local/qwen'].entries()) {
+    threads.handle(incoming(`r${i}`, chat.add(`r${i}`, 'u1', text), { id: `r${i}`, direct: true }));
+    await threads.idle();
+    assert.equal(sessions.get(`r${i}`)!.model, undefined, text);
+    assert.ok(sessions.get(`r${i}`)!.prompts[0]!.endsWith(`: ${text}`), text);
+  }
+  await threads.close();
+
+  const off = setup();
+  off.threads.handle(incoming('p0', off.chat.add('p0', 'u1', 'hi /model anthropic/claude-opus-5-5'), { direct: true }));
+  await off.threads.idle();
+  assert.equal(off.sessions.get('p0')!.model, undefined);
+  assert.match(off.sessions.get('p0')!.prompts[0]!, /: hi \/model anthropic\/claude-opus-5-5$/);
+  await off.threads.close();
+});
+
+test("a model that can't run is refused, and the next post that brings the bot in starts the thread afresh", async () => {
+  const { chat, sessions, threads } = setup(undefined, undefined, undefined, true);
+  threads.handle(incoming('p0', chat.add('p0', 'u1', 'hi /model anthropic/missing'), { direct: true }));
+  await threads.idle();
+  assert.equal(sessions.size, 0);
+  assert.equal(chat.replies[0]!.message, "Sorry, I can't run on that model: there is no model anthropic/missing");
+
+  threads.handle(incoming('p0', chat.add('p0', 'u1', 'hi /model local/qwen'), { direct: true }));
+  await threads.idle();
+  assert.deepEqual(sessions.get('p0')!.model, { provider: 'local', model: 'qwen', thinkingLevel: 'off' });
+  assert.equal(chat.replies[1]!.message, 'ok');
   await threads.close();
 });

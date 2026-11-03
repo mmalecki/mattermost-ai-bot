@@ -15,6 +15,7 @@ Set in `.env`:
   `mistral/mistral-small-2603` or `anthropic/claude-haiku-5-5:low`. 
   [Pi handles provider and model quirks](https://pi.dev/docs/latest/providers).
   Thinking is off by default unless suffix is set.
+  A thread runs on the model it started with, so a changed `MODEL` reaches new threads only.
 * The provider's API key, under Pi's [name for it](https://pi.dev/docs/latest/providers#use-an-api-key-from-the-environment) (for example: `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `MISTRAL_API_KEY`, ...)
 * `MAX_OUTPUT_TOKENS` - default 8192, or the model's own limit if lower. It includes reasoning, and keeps a model
   stuck repeating itself from running for long
@@ -27,6 +28,7 @@ Set in `.env`:
   [pi-ate-scheduler](https://github.com/catlain/pi-scheduler). Default `false`. See below
 * `CODEMODE` - `true` gives the agent [Pi's `codemode`](https://pi.dev/docs/latest/codemode) tool even when every MCP
   server has `direct` exposure. Default `false`. See below
+* `ALLOW_PICKING_MODEL` - `true` lets the post that starts a thread pick its model. Default `false`. See below
 * `TZ` - time zone the posts' times are given to the model in, with their UTC offset. Default: the system's
 
 Endpoints Pi doesn't know, such as a local llama.cpp server, go in `models.json` next to `mcp.json`, in
@@ -46,6 +48,20 @@ Endpoints Pi doesn't know, such as a local llama.cpp server, go in `models.json`
 ```
 
 with `MODEL=local/qwen3.6-35b`.
+
+### Picking a model
+With `ALLOW_PICKING_MODEL=true`, the post that brings the bot into a thread can end with `/model` and a model, written
+like `MODEL`, for the thread to run on instead:
+
+```
+@sailor draw me a lighthouse /model openrouter/google/gemini-3.1-pro:high
+```
+
+`/model` and the model are taken off the post, and the thread keeps the model for good: a `/model` on a later post is
+just text. A model Pi doesn't have, or has no API key for, is refused, and the next post that brings the bot into the
+thread starts it afresh. Anyone who can reach the bot can pick
+any model with a key, so turn it on only where everyone may spend on them. If a thread's model is gone later, it
+runs on `MODEL`.
 
 ### System prompt additions
 `APPEND_SYSTEM.md`, next to `mcp.json`, is added to the system prompt, as in Pi. Use it to read the agent in on its

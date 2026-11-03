@@ -13,7 +13,8 @@ import {
   SessionManager,
   SettingsManager,
 } from '@earendil-works/pi-coding-agent';
-import type { Config } from './config.ts';
+import { type Config, type ModelChoice, parseModel } from './config.ts';
+import { errorMessage } from './error.ts';
 import { loadScheduler, type ScheduledJob, scheduler } from './scheduler.ts';
 import { type GeneratedImage, imageGeneration, mcpServers, toolGuard, withoutCwd } from './tools.ts';
 
@@ -22,18 +23,27 @@ import { type GeneratedImage, imageGeneration, mcpServers, toolGuard, withoutCwd
 const FEATHER_PI_WEB = dirname(fileURLToPath(import.meta.resolve('@mmalecki/feather-pi-web/package.json')));
 
 export interface Agent {
-  /** Whether the model takes images. */
-  readonly images: boolean;
   /** Whether the thread has a session from an earlier run. */
   hasSession(rootId: string): boolean;
   /**
-   * Opens the thread's session, creating it on first use. With the scheduler on, `onScheduled` gets
-   * the thread's scheduled jobs as they come due; without it, the session can't schedule any. Likewise,
-   * with IMAGE_MODEL set, `onImage` gets the images the agent generates.
+   * The model `ref`, as `provider/model[:thinking]`, names. Throws, saying why for the thread, when it
+   * names none pi has, or one without an API key.
+   */
+  pickModel(ref: string): ModelChoice;
+  /**
+   * Opens the thread's session, creating it on first use. A new session runs on `model`, MODEL's by
+   * default; an existing one on the model it was created with. With the scheduler on, `onScheduled`
+   * gets the thread's scheduled jobs as they come due; without it, the session can't schedule any.
+   * Likewise, with IMAGE_MODEL set, `onImage` gets the images the agent generates.
    */
   openSession(
     rootId: string,
-    options: { allowTools: (toolName: string) => boolean; onScheduled?: (job: ScheduledJob) => void; onImage?: (image: GeneratedImage) => void },
+    options: {
+      model?: ModelChoice;
+      allowTools: (toolName: string) => boolean;
+      onScheduled?: (job: ScheduledJob) => void;
+      onImage?: (image: GeneratedImage) => void;
+    },
   ): Promise<AgentSession>;
   /** Shuts down the session's extensions, which closes their connections and timers, and disposes it. */
   closeSession(session: AgentSession): Promise<void>;
@@ -51,18 +61,43 @@ export async function createAgent(config: Config, botUsername: string): Promise<
   });
   const modelsError = modelRuntime.getError();
   if (modelsError) throw new Error(`${llm.modelsPath}: ${modelsError}`);
-  const found = modelRuntime.getModel(llm.provider, llm.model);
-  if (!found) throw new Error(`MODEL ${llm.provider}/${llm.model} is neither in pi's catalog nor in ${llm.modelsPath}`);
   // Keys come from pi's own variables, such as MISTRAL_API_KEY, or from models.json.
   const requireKey = (provider: string) => {
     if (!modelRuntime.getProviderAuthStatus(provider).configured) {
       throw new Error(`No API key for ${provider}: set its variable, such as ${provider.toUpperCase().replace(/-/g, '_')}_API_KEY`);
     }
   };
-  requireKey(llm.provider);
-  const model = { ...found, maxTokens: Math.min(found.maxTokens, llm.maxTokens) };
-  const images = model.input.includes('image');
-  console.log(`Model: ${llm.provider}/${llm.model} (${model.api}, thinking ${llm.thinkingLevel}, max ${model.maxTokens} tokens${images ? ', images' : ''})`);
+  /** The catalog's model, with its output capped. */
+  const findModel = (provider: string, id: string) => {
+    const found = modelRuntime.getModel(provider, id);
+    if (!found) throw new Error(`Model ${provider}/${id} is neither in pi's catalog nor in ${llm.modelsPath}`);
+    requireKey(provider);
+    return { ...found, maxTokens: Math.min(found.maxTokens, llm.maxTokens) };
+  };
+  if (!modelRuntime.getModel(llm.provider, llm.model)) throw new Error(`MODEL ${llm.provider}/${llm.model} is neither in pi's catalog nor in ${llm.modelsPath}`);
+  const model = findModel(llm.provider, llm.model);
+  console.log(
+    `Model: ${llm.provider}/${llm.model} (${model.api}, thinking ${llm.thinkingLevel}, max ${model.maxTokens} tokens${model.input.includes('image') ? ', images' : ''})`,
+  );
+
+  /**
+   * The model a session runs on: the one it was created with, as pi records it, or for a new session
+   * `choice`. A recorded model that is gone since, or has lost its key, gives way to MODEL.
+   */
+  const sessionModel = (rootId: string, sessionManager: SessionManager, choice: ModelChoice | undefined) => {
+    const recorded = sessionManager.buildSessionContext();
+    if (recorded.model) {
+      const { provider, modelId } = recorded.model;
+      try {
+        return { model: findModel(provider, modelId), thinkingLevel: recorded.thinkingLevel as ModelChoice['thinkingLevel'] };
+      } catch (error) {
+        console.warn(`Thread ${rootId}: ${errorMessage(error)}; running it on MODEL instead`);
+        return { model, thinkingLevel: llm.thinkingLevel };
+      }
+    }
+    if (!choice) return { model, thinkingLevel: llm.thinkingLevel };
+    return { model: findModel(choice.provider, choice.model), thinkingLevel: choice.thinkingLevel };
+  };
 
   const imageModel = config.imageModel && modelRuntime.getModelOfType('image', config.imageModel.provider, config.imageModel.model);
   if (config.imageModel) {
@@ -88,10 +123,27 @@ export async function createAgent(config: Config, botUsername: string): Promise<
   }
 
   return {
-    images,
     hasSession: (rootId) => existsSync(sessionFile(rootId)),
 
-    async openSession(rootId, { allowTools, onScheduled, onImage }) {
+    pickModel(ref) {
+      let choice;
+      try {
+        choice = parseModel(ref);
+      } catch {
+        throw new Error(`a model is written as provider/model[:thinking], not "${ref}"`);
+      }
+      const { provider, model: id } = choice;
+      // Said in the thread, so without the paths and variables of findModel's errors.
+      if (!modelRuntime.getProvider(provider)) throw new Error(`there is no provider ${provider}`);
+      if (!modelRuntime.getModel(provider, id)) throw new Error(`there is no model ${provider}/${id}`);
+      if (!modelRuntime.getProviderAuthStatus(provider).configured) throw new Error(`there is no API key for ${provider}`);
+      return choice;
+    },
+
+    async openSession(rootId, { model: choice, allowTools, onScheduled, onImage }) {
+      const sessionManager = SessionManager.open(sessionFile(rootId), sessionDir, config.dataDir);
+      const { model, thinkingLevel } = sessionModel(rootId, sessionManager, choice);
+      const images = model.input.includes('image');
       const resourceLoader = new DefaultResourceLoader({
         cwd: config.dataDir,
         agentDir,
@@ -133,7 +185,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
         cwd: config.dataDir,
         agentDir,
         model,
-        thinkingLevel: llm.thinkingLevel,
+        thinkingLevel,
         modelRuntime,
         resourceLoader,
         // No file or shell access: the bot only gets the extensions' tools.
@@ -142,7 +194,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
         ...(config.codemode ? { tools: ['+codemode'] } : {}),
         // pi's readers for MCP resources, declared even for servers without any.
         excludeTools: ['list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'],
-        sessionManager: SessionManager.open(sessionFile(rootId), sessionDir, config.dataDir),
+        sessionManager,
         settingsManager: SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true, maxRetries: 2 } }),
       });
       // Starts the extensions, which connects the MCP servers. pi catches what their handlers throw and

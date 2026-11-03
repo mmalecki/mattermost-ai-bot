@@ -23,6 +23,8 @@ export interface Config {
   scheduler: boolean;
   /** Whether the agent always has `codemode`, not only with servers of `codemode` exposure. */
   codemode: boolean;
+  /** Whether a thread's first post may pick the model the thread runs on, instead of `llm`'s. */
+  pickModel: boolean;
   /** Operator instructions added to the system prompt, used when the file exists. */
   appendSystemPromptPath: string;
   /** Thread sessions and pi's own state live here. */
@@ -35,6 +37,9 @@ export interface ToolsConfig {
   /** MCP servers in pi's `mcp.json` format, validated by pi when registered. */
   mcpServers: Record<string, McpServerConfig>;
 }
+
+/** A model a thread can run on, as MODEL names one. */
+export type ModelChoice = Pick<Config['llm'], 'provider' | 'model' | 'thinkingLevel'>;
 
 type ThinkingLevel = NonNullable<CreateAgentSessionOptions['thinkingLevel']>;
 const THINKING_LEVELS: readonly string[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] satisfies ThinkingLevel[];
@@ -72,6 +77,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     tools: loadTools(mcpConfig, !!env.MCP_CONFIG),
     scheduler: flag('SCHEDULER'),
     codemode: flag('CODEMODE'),
+    pickModel: flag('ALLOW_PICKING_MODEL'),
     // pi's name for instructions added to its system prompt, kept next to the tools they're about.
     appendSystemPromptPath: join(dirname(mcpConfig), 'APPEND_SYSTEM.md'),
     dataDir: resolve(env.DATA_DIR || 'data'),
@@ -82,7 +88,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
  * `provider/model[:thinking]`, as pi's `--model` takes it. The model may contain `/` itself, as
  * OpenRouter's do, and `:` too, so only a known thinking level after the last `:` counts as one.
  */
-export function parseModel(ref: string): Pick<Config['llm'], 'provider' | 'model' | 'thinkingLevel'> {
+export function parseModel(ref: string): ModelChoice {
   const slash = ref.indexOf('/');
   if (slash <= 0 || slash === ref.length - 1) throw new Error(`MODEL must be provider/model, such as mistral/mistral-small-2603, not "${ref}"`);
   const provider = ref.slice(0, slash);
