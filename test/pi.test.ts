@@ -74,11 +74,11 @@ async function localAgent({
   return { agent: await createAgent(loadConfig(env), 'sailor'), dir };
 }
 
-test('picks models pi knows, and only names providers it knows as models', async () => {
+test('picks models pi has, and says why it refuses others', async () => {
   const { agent } = await localAgent();
   assert.deepEqual(agent.pickModel('local/large:high'), { provider: 'local', model: 'large', thinkingLevel: 'high' });
-  assert.equal(agent.pickModel('etc/hosts'), undefined);
-  assert.equal(agent.pickModel('/local/large'), undefined);
+  assert.throws(() => agent.pickModel('large'), /^Error: a model is written as provider\/model\[:thinking\], not "large"$/);
+  assert.throws(() => agent.pickModel('remote/large'), /^Error: there is no provider remote$/);
   assert.throws(() => agent.pickModel('local/huge'), /^Error: there is no model local\/huge$/);
 });
 

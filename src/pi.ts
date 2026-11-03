@@ -135,11 +135,11 @@ export async function createAgent(config: Config, botUsername: string): Promise<
       try {
         choice = parseModel(ref);
       } catch {
-        return undefined;
+        throw new Error(`a model is written as provider/model[:thinking], not "${ref}"`);
       }
       const { provider, model: id } = choice;
-      if (!modelRuntime.getProvider(provider)) return undefined;
       // Said in the thread, so without the paths and variables of findModel's errors.
+      if (!modelRuntime.getProvider(provider)) throw new Error(`there is no provider ${provider}`);
       if (!modelRuntime.getModel(provider, id)) throw new Error(`there is no model ${provider}/${id}`);
       if (!modelRuntime.getProviderAuthStatus(provider).configured) throw new Error(`there is no API key for ${provider}`);
       return choice;

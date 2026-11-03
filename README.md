@@ -250,14 +250,14 @@ meantime is dropped, and a recurring one skips the times it missed, keeping to i
 minute for a recurring one, and a thread can have 10 jobs.
 
 #### Picking a model
-With `ALLOW_PICKING_MODEL=true`, the post that brings the bot into a thread can end with a model, written like `MODEL`
-after a `/`, for the thread to run on instead:
+With `ALLOW_PICKING_MODEL=true`, the post that brings the bot into a thread can end with `/model` and a model, written
+like `MODEL`, for the thread to run on instead:
 
 ```
-@sailor draw me a lighthouse /openrouter/google/gemini-3.1-pro:high
+@sailor draw me a lighthouse /model openrouter/google/gemini-3.1-pro:high
 ```
 
-This sets the model for the whole thread. Later model suffixes and unrecognized providers (for example `/etc/hosts`) are treated as ordinary text. If the model is unavailable or is missing an API key, the bot rejects the selection. You can retry with a different model in the same thread.
+This sets the model for the whole thread. A `/model` on a later post is treated as ordinary text. If the model is unavailable or is missing an API key, the bot rejects the selection. You can retry with a different model in the same thread.
 
 Anyone who can reach the bot can pick any model with a key, so turn it on only where everyone may spend on them.
 If a thread's model is gone later, it runs on `MODEL`.

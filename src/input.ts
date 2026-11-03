@@ -41,11 +41,11 @@ export function formatJob(job: ScheduledJob, now: number): string {
 }
 
 /**
- * `message` without its last word, when that is `/provider/model[:thinking]`, and the word without
- * its slash. Whether it names a model is the agent's to say.
+ * `message` without a trailing `/model <ref>`, and the ref. Whether it names a model is the agent's
+ * to say.
  */
 export function trailingModel(message: string): { message: string; ref: string } | undefined {
-  const match = /(?:^|\s)\/(\S+\/\S+)\s*$/.exec(message);
+  const match = /(?:^|\s)\/model\s+(\S+)\s*$/.exec(message);
   if (!match) return undefined;
   return { message: message.slice(0, match.index).trimEnd(), ref: match[1]! };
 }
