@@ -81,7 +81,7 @@ function fakeAgent(answer: Answer = () => 'ok', images = true) {
     pickModel(ref) {
       const choice = parseModel(ref);
       if (!['anthropic', 'local'].includes(choice.provider)) return undefined;
-      if (choice.model === 'missing') throw new Error(`Model ${choice.provider}/missing is neither in pi's catalog nor in models.json`);
+      if (choice.model === 'missing') throw new Error(`there is no model ${choice.provider}/missing`);
       return choice;
     },
     async openSession(rootId, { model, allowTools, onScheduled, onImage }) {
@@ -594,7 +594,7 @@ test("a model that can't run is refused, and the next post that brings the bot i
   threads.handle(incoming('p0', chat.add('p0', 'u1', 'hi /anthropic/missing'), { direct: true }));
   await threads.idle();
   assert.equal(sessions.size, 0);
-  assert.match(chat.replies[0]!.message, /^Sorry, I can't run on that model: Model anthropic\/missing is neither/);
+  assert.equal(chat.replies[0]!.message, "Sorry, I can't run on that model: there is no model anthropic/missing");
 
   threads.handle(incoming('p0', chat.add('p0', 'u1', 'hi /local/qwen'), { direct: true }));
   await threads.idle();

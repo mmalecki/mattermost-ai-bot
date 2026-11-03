@@ -7,6 +7,7 @@ const config = loadConfig();
 const servers = Object.keys(config.tools.mcpServers);
 console.log(`MCP servers: ${servers.join(', ') || '(none)'}`);
 if (servers.length && !config.tools.allowedUsers) console.warn('No allowedUsers in the MCP config: everyone can use every tool');
+if (config.pickModel) console.log('Model picking: on');
 
 const mattermost = new Mattermost(config.mattermost.url, config.mattermost.token);
 await mattermost.login();

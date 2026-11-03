@@ -27,7 +27,8 @@ export interface Agent {
   hasSession(rootId: string): boolean;
   /**
    * The model `ref`, as `provider/model[:thinking]`, names, or undefined when it names no provider
-   * pi knows, so isn't a model at all. Throws when the provider has no such model, or no API key.
+   * pi knows, so isn't a model at all. Throws, saying why for the thread, when the provider has no such
+   * model, or no API key.
    */
   pickModel(ref: string): ModelChoice | undefined;
   /**
@@ -131,8 +132,11 @@ export async function createAgent(config: Config, botUsername: string): Promise<
       } catch {
         return undefined;
       }
-      if (!modelRuntime.getProvider(choice.provider)) return undefined;
-      findModel('Model', choice.provider, choice.model);
+      const { provider, model: id } = choice;
+      if (!modelRuntime.getProvider(provider)) return undefined;
+      // Said in the thread, so without the paths and variables of findModel's errors.
+      if (!modelRuntime.getModel(provider, id)) throw new Error(`there is no model ${provider}/${id}`);
+      if (!modelRuntime.getProviderAuthStatus(provider).configured) throw new Error(`there is no API key for ${provider}`);
       return choice;
     },
 

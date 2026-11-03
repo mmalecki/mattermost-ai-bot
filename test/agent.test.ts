@@ -55,7 +55,7 @@ test('picks models pi knows, and only names providers it knows as models', async
   assert.deepEqual(agent.pickModel('local/large:high'), { provider: 'local', model: 'large', thinkingLevel: 'high' });
   assert.equal(agent.pickModel('etc/hosts'), undefined);
   assert.equal(agent.pickModel('/local/large'), undefined);
-  assert.throws(() => agent.pickModel('local/huge'), /^Error: Model local\/huge is neither in pi's catalog nor in /);
+  assert.throws(() => agent.pickModel('local/huge'), /^Error: there is no model local\/huge$/);
 });
 
 test('a session runs on the model it was created with, MODEL by default', async () => {
