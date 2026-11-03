@@ -74,7 +74,7 @@ interface FakeSession {
  * message for `null`. An answer may give its stop reason. Its providers are `anthropic` and `local`,
  * which have every model but `missing`.
  */
-function fakeAgent(answer: Answer = () => 'ok', images = true) {
+function fakeAgent(answer: Answer = () => 'ok', images = true, contextWindow?: number) {
   const sessions = new Map<string, FakeSession>();
   const agent: Agent = {
     hasSession: (rootId) => sessions.has(rootId),
@@ -90,7 +90,7 @@ function fakeAgent(answer: Answer = () => 'ok', images = true) {
       sessions.set(rootId, record);
       const messages: unknown[] = [];
       const session = {
-        model: { input: images ? ['text', 'image'] : ['text'] },
+        model: { input: images ? ['text', 'image'] : ['text'], contextWindow },
         sessionManager: {
           getEntries: () => entries,
           appendCustomEntry: (customType: string, data: unknown) => entries.push({ type: 'custom', customType, data }),
@@ -121,9 +121,9 @@ function fakeAgent(answer: Answer = () => 'ok', images = true) {
 }
 
 /** `null` leaves out the allowlist. `images` is whether the model takes them. */
-function setup(answer?: Answer, allowlist: string[] | null = ['maciej'], images = true, pickModel = false) {
+function setup(answer?: Answer, allowlist: string[] | null = ['maciej'], images = true, pickModel = false, contextWindow?: number) {
   const chat = new FakeChat();
-  const { agent, sessions } = fakeAgent(answer, images);
+  const { agent, sessions } = fakeAgent(answer, images, contextWindow);
   const threads = new Threads(agent, chat, { botUserId: BOT, allowedUsers: allowlist ? new Set(allowlist) : undefined, idleMs: 60_000, pickModel });
   return { chat, sessions, threads };
 }
@@ -306,6 +306,15 @@ test('text past the limit for one batch of posts is cut off at a line end, and l
   assert.match(prompt, /x\n\[end of file: a\.csv\]\n\[file: b\.csv \(text\/csv\)\]\n/);
   assert.match(prompt, /x\n\[end of file: b\.csv, cut off after 56 KB of 100 KB\]\n\[file: c\.csv \(text\/csv\), not shown: too much text at once\]$/);
   assert.equal(chat.downloads.length, 2);
+  await threads.close();
+});
+
+test("a small model's context window cuts text off sooner", async () => {
+  const { chat, sessions, threads } = setup(undefined, ['maciej'], true, false, 2048);
+  chat.files.set('f1', new TextEncoder().encode(`${'x'.repeat(1023)}\n`.repeat(4)));
+  threads.handle(incoming('r1', chat.add('r1', 'u1', '', [textFile('f1', 'a.csv')]), { id: 'r1', direct: true }));
+  await threads.idle();
+  assert.match(sessions.get('r1')!.prompts[0]!, /\[end of file: a\.csv, cut off after 2 KB of 4 KB\]$/);
   await threads.close();
 });
 
