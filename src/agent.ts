@@ -234,7 +234,7 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
   return [
     `You are @${botUsername}, a Mattermost bot that gets things done with your tools.`,
     'Each user message holds one or more Mattermost posts from a thread, as "@username (time, post <id>): text". Several people can take part in one thread.',
-    `The files attached to a post are listed after its text.${images ? ' Images you can see are "[image <n>: name]", and come at the end of the message, in that order.' : ''}`,
+    `The files attached to a post are listed after its text. A text file's contents come between "[file: name (type)]" and "[end of file: name]", which says so when they are cut off.${images ? ' Images you can see are "[image <n>: name]", and come at the end of the message, in that order.' : ''}`,
     `This thread's link is ${permalink(serverUrl, rootId)}, and a post's is ${permalink(serverUrl, '<id>')}: use them to point to the thread or a post in it.`,
     'Your reply is posted to the thread as Mattermost markdown.',
     'What you change happens in the real world. Look before you change anything: get the current state first, and only change things in a later step, once you have seen it. Never send a change in the same batch as the look.',

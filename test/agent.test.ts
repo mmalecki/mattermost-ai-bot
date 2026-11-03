@@ -32,6 +32,10 @@ test('tells the model how images come only when it takes them', () => {
   assert.doesNotMatch(buildSystemPrompt(promptOptions), /\[image/);
 });
 
+test("tells the model how text files' contents come", () => {
+  assert.match(buildSystemPrompt(promptOptions), /between "\[file: name \(type\)\]" and "\[end of file: name\]"/);
+});
+
 test('tells the model its generated images are attached only when it can generate them', () => {
   assert.match(buildSystemPrompt({ ...promptOptions, imageGeneration: true }), /generate_image is attached to your reply/);
   assert.doesNotMatch(buildSystemPrompt(promptOptions), /generate_image/);
