@@ -15,6 +15,7 @@ const threads = new Threads(agent, mattermost, {
   botUserId: mattermost.botUserId,
   allowedUsers: config.tools.allowedUsers,
   idleMs: 15 * 60_000,
+  pickModel: config.pickModel,
 });
 mattermost.listen((post) => threads.handle(post));
 
