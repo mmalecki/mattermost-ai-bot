@@ -23,6 +23,8 @@ export interface Config {
   scheduler: boolean;
   /** Whether the agent always has `codemode`, not only with servers of `codemode` exposure. */
   codemode: boolean;
+  /** Whether a thread's first post may pick the model the thread runs on, instead of `llm`'s. */
+  pickModel: boolean;
   /** Operator instructions added to the system prompt, used when the file exists. */
   appendSystemPromptPath: string;
   /** Thread sessions and pi's own state live here. */
@@ -72,6 +74,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     tools: loadTools(mcpConfig, !!env.MCP_CONFIG),
     scheduler: flag('SCHEDULER'),
     codemode: flag('CODEMODE'),
+    pickModel: flag('ALLOW_PICKING_MODEL'),
     // pi's name for instructions added to its system prompt, kept next to the tools they're about.
     appendSystemPromptPath: join(dirname(mcpConfig), 'APPEND_SYSTEM.md'),
     dataDir: resolve(env.DATA_DIR || 'data'),

@@ -66,6 +66,13 @@ test('CODEMODE is off unless set to true or 1', () => {
   assert.throws(() => loadConfig({ ...env, CODEMODE: 'yes' }), /CODEMODE must be true or false/);
 });
 
+test('ALLOW_PICKING_MODEL is off unless set to true or 1', () => {
+  assert.equal(loadConfig(base).pickModel, false);
+  assert.equal(loadConfig({ ...base, ALLOW_PICKING_MODEL: 'true' }).pickModel, true);
+  assert.equal(loadConfig({ ...base, ALLOW_PICKING_MODEL: '1' }).pickModel, true);
+  assert.throws(() => loadConfig({ ...base, ALLOW_PICKING_MODEL: 'yes' }), /ALLOW_PICKING_MODEL must be true or false/);
+});
+
 test('MCP_CONFIG must exist when set; the default mcp.json may be missing', () => {
   const dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-'));
   const env = { ...base, MCP_CONFIG: join(dir, 'missing.json') };
