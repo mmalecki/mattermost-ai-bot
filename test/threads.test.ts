@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ImageContent } from '@earendil-works/pi-ai';
-import type { AgentSession } from '@earendil-works/pi-coding-agent';
-import type { Agent } from '../src/agent.ts';
+import type { SessionEntry } from '@earendil-works/pi-coding-agent';
+import type { Agent, ThreadSession } from '../src/agent.ts';
 import { type ModelChoice, parseModel } from '../src/config.ts';
 import type { ScheduledJob } from '../src/scheduler.ts';
 import { type Chat, type IncomingPost, type OutgoingFile, type PostFile, type ThreadPost, Threads } from '../src/threads.ts';
@@ -80,16 +80,21 @@ interface FakeSession {
   closed: boolean;
 }
 
+const MODEL: ModelChoice = { provider: 'local', model: 'default', thinkingLevel: 'off' };
+
 /**
  * An agent whose sessions answer each prompt with `answer(prompt)`, fail when it throws, and add no
  * message for `null`. An answer may give its stop reason. Its providers are `anthropic` and `local`,
- * which have every model but `missing`.
+ * which have every model but `missing`. Closing a session waits for `closing`, when given.
  */
-function fakeAgent(answer: Answer = () => 'ok', images = true, imageEdits = false) {
+function fakeAgent(answer: Answer, images: boolean, imageEdits: boolean, closing?: () => Promise<void>) {
   const sessions = new Map<string, FakeSession>();
+  const prompted = new Set<string>();
+  /** What happened to sessions, in order. */
+  const events: string[] = [];
   const agent: Agent = {
     imageEdits,
-    hasSession: (rootId) => sessions.has(rootId),
+    hasSession: (rootId) => prompted.has(rootId),
     pickModel(ref) {
       const choice = parseModel(ref);
       if (!['anthropic', 'local'].includes(choice.provider)) return undefined;
@@ -97,20 +102,21 @@ function fakeAgent(answer: Answer = () => 'ok', images = true, imageEdits = fals
       return choice;
     },
     async openSession(rootId, { model, allowTools, onScheduled, imageStore }) {
+      events.push(`open ${rootId}`);
       const entries: unknown[] = [];
       const record: FakeSession = { model, prompts: [], images: [], allowed: [], entries, onScheduled, imageStore, closed: false };
       sessions.set(rootId, record);
       const messages: unknown[] = [];
-      const session = {
-        model: { input: images ? ['text', 'image'] : ['text'] },
-        sessionManager: {
-          getEntries: () => entries,
-          appendCustomEntry: (customType: string, data: unknown) => entries.push({ type: 'custom', customType, data }),
+      const session: ThreadSession = {
+        model: model ?? MODEL,
+        takesImages: images,
+        get messages() {
+          return messages as ThreadSession['messages'];
         },
-        messages,
-        async prompt(text: string, options?: { images?: ImageContent[] }) {
+        async prompt(text, images = []) {
+          prompted.add(rootId);
           record.prompts.push(text);
-          record.images.push(options?.images ?? []);
+          record.images.push(images);
           record.allowed.push(allowTools('websearch'));
           try {
             const timestamp = Date.now();
@@ -121,26 +127,40 @@ function fakeAgent(answer: Answer = () => 'ok', images = true, imageEdits = fals
             messages.push({ role: 'assistant', stopReason: 'error', timestamp: Date.now(), errorMessage: (error as Error).message, content: [] });
           }
         },
-        dispose: () => (record.closed = true),
+        abort: async () => {},
+        entries: () => entries as SessionEntry[],
+        appendEntry: (customType, data) => void entries.push({ type: 'custom', customType, data }),
+        async close() {
+          events.push(`closing ${rootId}`);
+          await closing?.();
+          record.closed = true;
+          events.push(`closed ${rootId}`);
+        },
       };
-      return session as unknown as AgentSession;
-    },
-    async closeSession(session) {
-      session.dispose();
+      return session;
     },
   };
-  return { agent, sessions };
+  return { agent, sessions, events };
 }
 
-/**
- * `null` leaves out the allowlist. `images` is whether the model takes them, `imageEdits` whether
- * generate_image does.
- */
-function setup(answer?: Answer, allowlist: string[] | null = ['maciej'], images = true, imageEdits = false, pickModel = false) {
+interface SetupOptions {
+  answer?: Answer;
+  /** `null` leaves out the allowlist. */
+  allowlist?: string[] | null;
+  /** Whether the model takes images. */
+  images?: boolean;
+  /** Whether generate_image takes images. */
+  imageEdits?: boolean;
+  pickModel?: boolean;
+  /** Closing a session waits for this. */
+  closing?: () => Promise<void>;
+}
+
+function setup({ answer = () => 'ok', allowlist = ['maciej'], images = true, imageEdits = false, pickModel = false, closing }: SetupOptions = {}) {
   const chat = new FakeChat();
-  const { agent, sessions } = fakeAgent(answer, images, imageEdits);
+  const { agent, sessions, events } = fakeAgent(answer, images, imageEdits, closing);
   const threads = new Threads(agent, chat, { botUserId: BOT, allowedUsers: allowlist ? new Set(allowlist) : undefined, idleMs: 60_000, pickModel });
-  return { chat, sessions, threads };
+  return { chat, sessions, events, threads };
 }
 
 function incoming(rootId: string, post: ThreadPost, extra: Partial<IncomingPost> = {}): IncomingPost {
@@ -275,7 +295,7 @@ test('images past the limit for one batch of posts are only named', async () => 
 });
 
 test("a model that doesn't take images gets their names only", async () => {
-  const { chat, sessions, threads } = setup(undefined, ['maciej'], false);
+  const { chat, sessions, threads } = setup({ images: false });
   chat.files.set('f1', new Uint8Array([1]));
   threads.handle(incoming('r1', chat.add('r1', 'u1', '', [image('f1', 'garage.png')]), { id: 'r1', direct: true }));
   await threads.idle();
@@ -287,10 +307,10 @@ test("a model that doesn't take images gets their names only", async () => {
 test('posts arriving during a run are handed over together afterwards', async () => {
   let release!: () => void;
   const first = new Promise<void>((resolve) => (release = resolve));
-  const { chat, sessions, threads } = setup(async (prompt) => {
+  const { chat, sessions, threads } = setup({ answer: async (prompt) => {
     if (prompt.includes('first')) await first;
     return 'ok';
-  });
+  } });
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'first'), { id: 'r1', direct: true }));
   await new Promise((resolve) => setImmediate(resolve));
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'second')));
@@ -340,7 +360,7 @@ test('posts from before the bot was mentioned count too', async () => {
 });
 
 test("an author who can't be looked up any more turns tools off, and the thread still gets answers", async () => {
-  const { chat, sessions, threads } = setup(undefined, ['maciej', 'carol']);
+  const { chat, sessions, threads } = setup({ allowlist: ['maciej', 'carol'] });
   threads.handle(incoming('r1', chat.add('r1', 'u3', 'lights on'), { id: 'r1', direct: true }));
   await threads.idle();
   chat.gone.add('u3');
@@ -352,7 +372,7 @@ test("an author who can't be looked up any more turns tools off, and the thread 
 });
 
 test("a post whose author can't be looked up any more is answered by id, not retried forever", async () => {
-  const { chat, sessions, threads } = setup(undefined, ['maciej']);
+  const { chat, sessions, threads } = setup();
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'hi'), { id: 'r1', direct: true }));
   await threads.idle();
 
@@ -368,7 +388,7 @@ test("a post whose author can't be looked up any more is answered by id, not ret
 });
 
 test('without an allowlist everyone may use tools', async () => {
-  const { chat, sessions, threads } = setup(undefined, null);
+  const { chat, sessions, threads } = setup({ allowlist: null });
   threads.handle(incoming('r1', chat.add('r1', 'u2', 'search this'), { id: 'r1', direct: true }));
   await threads.idle();
   assert.deepEqual(sessions.get('r1')!.allowed, [true]);
@@ -376,9 +396,9 @@ test('without an allowlist everyone may use tools', async () => {
 });
 
 test('a failed run is reported in the thread', async () => {
-  const { chat, threads } = setup(() => {
+  const { chat, threads } = setup({ answer: () => {
     throw new Error('rate limited');
-  });
+  } });
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'hi'), { id: 'r1', direct: true }));
   await threads.idle();
   assert.deepEqual(chat.replies.map((r) => r.message), ["Sorry, I couldn't finish: rate limited"]);
@@ -387,7 +407,7 @@ test('a failed run is reported in the thread', async () => {
 
 test("a run that adds no answer says so, and doesn't post the previous one again", async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 25, 16) });
-  const { chat, threads } = setup((prompt) => (prompt.includes('first') ? 'ok' : null));
+  const { chat, threads } = setup({ answer: (prompt) => (prompt.includes('first') ? 'ok' : null) });
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'first'), { id: 'r1', direct: true }));
   await threads.idle();
   t.mock.timers.tick(1_000);
@@ -399,7 +419,7 @@ test("a run that adds no answer says so, and doesn't post the previous one again
 });
 
 test('an answer cut off at the output limit says so', async () => {
-  const { chat, threads } = setup((prompt) => ({ text: prompt.includes('long') ? 'Part of it' : '', stopReason: 'length' }));
+  const { chat, threads } = setup({ answer: (prompt) => ({ text: prompt.includes('long') ? 'Part of it' : '', stopReason: 'length' }) });
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'a long answer'), { id: 'r1', direct: true }));
   await threads.idle();
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'all reasoning')));
@@ -412,7 +432,7 @@ test('an answer cut off at the output limit says so', async () => {
 });
 
 test('a scheduled job that comes due is run, and its answer posted to the thread', async () => {
-  const { chat, sessions, threads } = setup((prompt) => (prompt.startsWith('Scheduled') ? 'The garage is closed.' : 'ok'));
+  const { chat, sessions, threads } = setup({ answer: (prompt) => (prompt.startsWith('Scheduled') ? 'The garage is closed.' : 'ok') });
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'check the garage at 6'), { id: 'r1', direct: true }));
   await threads.idle();
 
@@ -442,10 +462,10 @@ test('a scheduled job gets no tools once someone not on the allowlist has posted
 test('closing lets the current run finish, then closes the session and takes no more posts', async () => {
   let release!: () => void;
   const first = new Promise<void>((resolve) => (release = resolve));
-  const { chat, sessions, threads } = setup(async (prompt) => {
+  const { chat, sessions, threads } = setup({ answer: async (prompt) => {
     if (prompt.includes('first')) await first;
     return 'ok';
-  });
+  } });
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'first'), { id: 'r1', direct: true }));
   await new Promise((resolve) => setImmediate(resolve));
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'second')));
@@ -466,10 +486,10 @@ test('closing lets the current run finish, then closes the session and takes no 
 test('a job that comes due during a run waits for it, and for posts that came in meanwhile', async () => {
   let release!: () => void;
   const first = new Promise<void>((resolve) => (release = resolve));
-  const { chat, sessions, threads } = setup(async (prompt) => {
+  const { chat, sessions, threads } = setup({ answer: async (prompt) => {
     if (prompt.includes('first')) await first;
     return 'ok';
-  });
+  } });
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'first'), { id: 'r1', direct: true }));
   await new Promise((resolve) => setImmediate(resolve));
   sessions.get('r1')!.onScheduled!({ id: 'j1', prompt: 'Report' });
@@ -507,16 +527,36 @@ test('a thread stays open while its session has scheduled jobs pending', async (
   await threads.close();
 });
 
+test('a thread that idled closes its session before a new post opens it again', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let finish!: () => void;
+  const closing = new Promise<void>((resolve) => (finish = resolve));
+  const { chat, events, threads } = setup({ closing: () => closing });
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'hi'), { id: 'r1', direct: true }));
+  await threads.idle();
+  t.mock.timers.tick(60_000);
+
+  // Both sessions would write to the thread's file.
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'again')));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ['open r1', 'closing r1']);
+  finish();
+  await threads.idle();
+  assert.deepEqual(events, ['open r1', 'closing r1', 'closed r1', 'open r1']);
+  assert.deepEqual(chat.replies.map((r) => r.message), ['ok', 'ok']);
+  await threads.close();
+});
+
 const FOX = { type: 'image' as const, mimeType: 'image/png', data: Buffer.from('fox').toString('base64') };
 const OWL = { type: 'image' as const, mimeType: 'image/webp', data: Buffer.from('owl').toString('base64') };
 
 test("images the agent generates are posted with the run's reply, decoded", async () => {
-  const { chat, sessions, threads } = setup((prompt) => {
+  const { chat, sessions, threads } = setup({ answer: (prompt) => {
     if (prompt.includes('thanks')) return 'ok';
     assert.equal(sessions.get('r1')!.imageStore!.add(FOX), 'image-1.png');
     assert.equal(sessions.get('r1')!.imageStore!.add(OWL), 'image-2.webp');
     return 'A fox and an owl.';
-  });
+  } });
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'draw a fox and an owl'), { id: 'r1', direct: true }));
   await threads.idle();
   assert.deepEqual(chat.replies, [
@@ -540,11 +580,11 @@ test("images the agent generates are posted with the run's reply, decoded", asyn
 
 test('generated images are posted without text, and with a run that fails, numbered across the thread', async () => {
   let fail = false;
-  const { chat, sessions, threads } = setup(() => {
+  const { chat, sessions, threads } = setup({ answer: () => {
     sessions.get('r1')!.imageStore!.add(FOX);
     if (fail) throw new Error('rate limited');
     return '';
-  });
+  } });
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'draw a fox'), { id: 'r1', direct: true }));
   await threads.idle();
   fail = true;
@@ -562,7 +602,7 @@ test('generated images are posted without text, and with a run that fails, numbe
 
 // A root post's id is its thread's: incoming() gives p0 no root id.
 test('the post that starts a thread picks its model with a trailing /provider/model, taken off it', async () => {
-  const { chat, sessions, threads } = setup(undefined, undefined, undefined, false, true);
+  const { chat, sessions, threads } = setup({ pickModel: true });
   threads.handle(incoming('p0', chat.add('p0', 'u1', 'draw a lighthouse /anthropic/claude-opus-5-5:high'), { direct: true }));
   await threads.idle();
   const session = sessions.get('p0')!;
@@ -578,7 +618,7 @@ test('the post that starts a thread picks its model with a trailing /provider/mo
 });
 
 test('in a thread the bot is brought into, the post that mentions it picks the model', async () => {
-  const { chat, sessions, threads } = setup(undefined, undefined, undefined, false, true);
+  const { chat, sessions, threads } = setup({ pickModel: true });
   chat.add('r1', 'u2', 'what about /local/earlier');
   threads.handle(incoming('r1', chat.add('r1', 'u1', '@sailor check /local/qwen'), { mentioned: true }));
   await threads.idle();
@@ -589,7 +629,7 @@ test('in a thread the bot is brought into, the post that mentions it picks the m
 });
 
 test('a trailing word naming no provider is ordinary text, as is every word without ALLOW_PICKING_MODEL', async () => {
-  const { chat, sessions, threads } = setup(undefined, undefined, undefined, false, true);
+  const { chat, sessions, threads } = setup({ pickModel: true });
   threads.handle(incoming('r1', chat.add('r1', 'u1', "what's in /etc/hosts"), { id: 'r1', direct: true }));
   await threads.idle();
   assert.equal(sessions.get('r1')!.model, undefined);
@@ -605,7 +645,7 @@ test('a trailing word naming no provider is ordinary text, as is every word with
 });
 
 test("a model that can't run is refused, and the next post that brings the bot in starts the thread afresh", async () => {
-  const { chat, sessions, threads } = setup(undefined, undefined, undefined, false, true);
+  const { chat, sessions, threads } = setup({ pickModel: true });
   threads.handle(incoming('p0', chat.add('p0', 'u1', 'hi /anthropic/missing'), { direct: true }));
   await threads.idle();
   assert.equal(sessions.size, 0);
@@ -619,14 +659,14 @@ test("a model that can't run is refused, and the next post that brings the bot i
 });
 
 test('with generate_image taking images, image lines give their file ids, seen or not', async () => {
-  const { chat, sessions, threads } = setup(undefined, ['maciej'], true, true);
+  const { chat, sessions, threads } = setup({ imageEdits: true });
   chat.files.set('f1', new Uint8Array([1]));
   const files = [image('f1', 'garage.png'), image('f2', 'odd.heic', { mimeType: 'image/heic', hasPreview: false })];
   threads.handle(incoming('r1', chat.add('r1', 'u1', '', files), { id: 'r1', direct: true }));
   await threads.idle();
   assert.match(sessions.get('r1')!.prompts[0]!, /: \[image 1: garage\.png, file f1\]\n\[image: odd\.heic, file f2, not shown: too large, or in a format you can't see\]$/);
 
-  const blind = setup(undefined, ['maciej'], false, true);
+  const blind = setup({ images: false, imageEdits: true });
   blind.threads.handle(incoming('r1', blind.chat.add('r1', 'u1', '', [image('f1', 'garage.png')]), { id: 'r1', direct: true }));
   await blind.threads.idle();
   assert.match(blind.sessions.get('r1')!.prompts[0]!, /: \[image: garage\.png, file f1, which you can't see\]$/);
@@ -635,7 +675,7 @@ test('with generate_image taking images, image lines give their file ids, seen o
 
 test("generate_image gets the thread's images by file id, and generated ones by name, in this run or a later one", async () => {
   let got: unknown[] = [];
-  const { chat, sessions, threads } = setup(async (prompt) => {
+  const { chat, sessions, threads } = setup({ answer: async (prompt) => {
     const store = sessions.get('r1')!.imageStore!;
     if (prompt.includes('draw')) {
       store.add(FOX);
@@ -644,7 +684,7 @@ test("generate_image gets the thread's images by file id, and generated ones by 
       got = await store.get(['image-1.png']);
     }
     return 'ok';
-  }, ['maciej'], true, true);
+  }, imageEdits: true });
   chat.files.set('f1', new Uint8Array([1])).set('f2', new Uint8Array([2]));
   const files = [image('f1', 'garage.png'), image('f2', 'scan.tiff', { mimeType: 'image/tiff' })];
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'draw on these', files), { id: 'r1', direct: true }));
@@ -670,7 +710,7 @@ test("generate_image gets the thread's images by file id, and generated ones by 
 
 test("generate_image gets nothing from outside the thread, nor a generated image that wasn't posted", async () => {
   const errors: string[] = [];
-  const { chat, sessions, threads } = setup(async (prompt) => {
+  const { chat, sessions, threads } = setup({ answer: async (prompt) => {
     const store = sessions.get('r1')!.imageStore!;
     if (prompt.includes('draw')) store.add(FOX);
     for (const refs of [['elsewhere'], ['f1'], ['image-1.png']]) {
@@ -680,7 +720,7 @@ test("generate_image gets nothing from outside the thread, nor a generated image
       );
     }
     return 'ok';
-  }, ['maciej'], true, true);
+  }, imageEdits: true });
   chat.uploadFails = true;
   chat.files.set('elsewhere', new Uint8Array([1]));
   chat.add('r2', 'u1', '', [image('elsewhere', 'secret.png')]);
@@ -706,7 +746,7 @@ test("generate_image gets fetched images from their tool results in the session,
   const fetched = { type: 'image' as const, data: 'ZmV0Y2hlZA==', mimeType: 'image/jpeg' };
   let got: unknown[] = [];
   let error = '';
-  const { chat, sessions, threads } = setup(async () => {
+  const { chat, sessions, threads } = setup({ answer: async () => {
     const { imageStore, entries } = sessions.get('r1')!;
     // As pi stores webfetch's result, with the hook's note.
     entries.push({ type: 'message', message: { role: 'toolResult', toolCallId: 'c1', content: [{ type: 'text', text: 'URL: x' }, FOX, fetched] } });
@@ -715,7 +755,7 @@ test("generate_image gets fetched images from their tool results in the session,
     got = await imageStore!.get(['fetched-1.jpg', 'f1']);
     await imageStore!.get(['fetched-2.png']).catch((e: Error) => (error = e.message));
     return 'ok';
-  }, ['maciej'], true, true);
+  }, imageEdits: true });
   chat.files.set('f1', new Uint8Array([1]));
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'combine', [image('f1', 'garage.png')]), { id: 'r1', direct: true }));
   await threads.idle();

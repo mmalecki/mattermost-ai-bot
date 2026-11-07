@@ -147,7 +147,7 @@ async function runCase(c: Case, run: number): Promise<Result> {
     void session.abort();
   }, timeoutMs);
   try {
-    await session.prompt(formatPosts([{ id: 'p', userId: 'u', createAt: started, message: c.post, files: [] }], ['mmalecki']), { expandPromptTemplates: false });
+    await session.prompt(formatPosts([{ id: 'p', userId: 'u', createAt: started, message: c.post, files: [] }], ['mmalecki']));
     const assistant = session.messages.filter((m) => m.role === 'assistant') as AssistantMessage[];
     const calls = assistant.flatMap((m) => m.content.flatMap((b) => (b.type === 'toolCall' ? [b] : [])));
     const toolCalls = calls.map((b) => b.name);
@@ -180,7 +180,7 @@ async function runCase(c: Case, run: number): Promise<Result> {
     clearTimeout(timer);
     // As the bot does: shutting the extensions down also clears scheduled jobs, which would
     // otherwise fire into the disposed session.
-    await agent.closeSession(session);
+    await session.close();
   }
 }
 
