@@ -22,7 +22,7 @@ test("lists what directly exposed servers offer, in the format of pi's mcp_serve
   assert.deepEqual(directServers({}), []);
 });
 
-const promptOptions = { botUsername: 'sailor', servers: {}, scheduler: false, images: false, imageGeneration: false, imageEdits: false, serverUrl: 'https://chat.example', rootId: 'r1' };
+const promptOptions = { botUsername: 'sailor', servers: {}, scheduler: false, images: false, imageGeneration: false, imageEdits: false, imageServers: [], serverUrl: 'https://chat.example', rootId: 'r1' };
 
 test('links posts without their team, and gives the model the thread\'s link', () => {
   assert.equal(permalink('https://chat.example', 'p1'), 'https://chat.example/_redirect/pl/p1');
@@ -42,6 +42,11 @@ test('tells the model its generated images are attached only when it can generat
 test('tells the model how to give generate_image images only when it takes them', () => {
   assert.match(buildSystemPrompt({ ...promptOptions, imageGeneration: true, imageEdits: true }), /pass its name to generate_image in images/);
   assert.doesNotMatch(buildSystemPrompt({ ...promptOptions, imageGeneration: true }), /pass it to generate_image/);
+});
+
+test('tells the model which servers take images by name', () => {
+  assert.match(buildSystemPrompt({ ...promptOptions, imageServers: ['bar-codes', 'vision'] }), /The tools of mcp__bar_codes, mcp__vision take images by name/);
+  assert.doesNotMatch(buildSystemPrompt(promptOptions), /take images by name/);
 });
 
 /** An agent on `local/small`, from a models.json that also has `local/large`, which takes images. */

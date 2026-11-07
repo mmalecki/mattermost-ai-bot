@@ -155,6 +155,27 @@ like the built-in tools, which suits small models and small servers best. `codem
 included, to run calls in parallel or cut down large results. The `description` of every enabled server is
 shown to the model, whatever its exposure. `mcp.example.json` is a starting point.
 
+#### Images for MCP servers
+A server's tools can take the thread's images, which the agent gives them by name, as it does `generate_image`, with
+another addition: the server's `images`, saying how its tools take an image:
+
+* `base64` - the image's data, in base64
+* `dataUrl` - a `data:` URL with it
+* `path` - the path of its file in `DATA_DIR`, for a server started by the bot, or one the directory is shared with
+
+```json
+{
+  "mcpServers": {
+    "barcodes": { "command": "npx", "args": ["-y", "@cordfuse/barcoding-mcp"], "exposure": "direct", "images": "base64" }
+  }
+}
+```
+
+Every string in a call to one of its tools that names an image in the thread, such as `"base64": "garage.png"`, is
+replaced with the image, before the call reaches the server, and only there: the session keeps the name. Images
+are passed on whole, up to 20 MB for a posted one, which `base64` and `dataUrl` grow by a third, so a server may
+refuse large ones.
+
 ### Scheduled jobs
 With `SCHEDULER=true`, the agent gets a `schedule` tool: "remind me at 6 to close the garage", "every morning, check
 the weather". A job belongs to its thread. When it comes due, its prompt reaches the agent like a post, and the reply is

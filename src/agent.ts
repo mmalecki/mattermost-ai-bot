@@ -19,7 +19,7 @@ import { type Config, type ModelChoice, parseModel } from './config.ts';
 import { errorMessage } from './error.ts';
 import { loadScheduler, type ScheduledJob, scheduler } from './scheduler.ts';
 import { type ImageFiles, imageFiles } from './images.ts';
-import { type ImageStore, imageGeneration, mcpServers, toolGuard, toolImages, withoutCwd } from './tools.ts';
+import { type ImageStore, imageGeneration, mcpImages, mcpNamespace, mcpServers, toolGuard, toolImages, withoutCwd } from './tools.ts';
 
 // Published as TypeScript, which Node won't strip under node_modules, so pi loads it like any
 // installed pi package.
@@ -156,7 +156,8 @@ export async function createAgent(config: Config, botUsername: string): Promise<
   }
 
   const imageEdits = !!imageModel?.input.includes('image');
-  const imageTools = imageEdits;
+  const { serverImages } = config.tools;
+  const imageTools = imageEdits || Object.keys(serverImages).length > 0;
 
   return {
     imageTools,
@@ -198,7 +199,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           toolGuard(allowTools),
           ...(schedulerExtension && onScheduled ? [scheduler(schedulerExtension, onScheduled)] : []),
           ...(imageModel && imageStore ? [imageGeneration(modelRuntime, imageModel, imageStore)] : []),
-          ...(imageTools && imageStore ? [toolImages(imageStore, ['generate_image'])] : []),
+          ...(imageTools && imageStore ? [toolImages(imageStore, ['generate_image']), mcpImages(serverImages, imageStore)] : []),
           withoutCwd(),
         ],
         noExtensions: true,
@@ -213,6 +214,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           images,
           imageGeneration: !!imageModel,
           imageEdits,
+          imageServers: Object.keys(serverImages),
           serverUrl: config.mattermost.publicUrl,
           rootId,
         }),
@@ -278,6 +280,8 @@ export interface SystemPromptOptions {
   imageGeneration: boolean;
   /** Whether generate_image takes images to change. */
   imageEdits: boolean;
+  /** The MCP servers that take images by name. */
+  imageServers: string[];
   /** Where people open the server, for links. */
   serverUrl: string;
   /** The thread's root post, so its link can be given. */
@@ -285,7 +289,7 @@ export interface SystemPromptOptions {
 }
 
 export function buildSystemPrompt(options: SystemPromptOptions): string {
-  const { botUsername, servers, scheduler, images, imageGeneration, imageEdits, serverUrl, rootId } = options;
+  const { botUsername, servers, scheduler, images, imageGeneration, imageEdits, imageServers, serverUrl, rootId } = options;
   return [
     `You are @${botUsername}, a Mattermost bot that gets things done with your tools.`,
     'Each user message holds one or more Mattermost posts from a thread, as "@username (time, post <id>): text". Several people can take part in one thread.',
@@ -312,6 +316,11 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
           'To change an image, or make one from it, pass its name to generate_image in images: one posted in the thread by the name on its [image] line, one you generated or a tool returned by the name it was saved as. Say what to change in the prompt.',
         ]
       : []),
+    ...(imageServers.length
+      ? [
+          `The tools of ${imageServers.map(mcpNamespace).join(', ')} take images by name: where one asks for an image, as a path, a URL or base64 data, give the name of an image in this thread, from its [image] line or the name it was saved as, and the image is passed on as the tool takes it.`,
+        ]
+      : []),
     ...directServers(servers),
   ].join('\n');
 }
@@ -333,9 +342,4 @@ export function directServers(servers: Record<string, McpServerConfig>): string[
  */
 export function permalink(serverUrl: string, postId: string): string {
   return `${serverUrl}/_redirect/pl/${postId}`;
-}
-
-/** Tool names are `mcp__<server>__<tool>`, with `-` in the server name replaced by `_`. */
-function mcpNamespace(server: string): string {
-  return `mcp__${server.replace(/[^A-Za-z0-9_]/g, '_')}`;
 }

@@ -1,6 +1,7 @@
 import { type ImageApi, type ImageContent, type ImageModel, Type } from '@earendil-works/pi-ai';
 import { defineTool, type ExtensionFactory, type McpServerConfig, type ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { textOf } from './content.ts';
+import type { ImageForm } from './config.ts';
 import { errorMessage } from './error.ts';
 import type { ImageFiles } from './images.ts';
 
@@ -146,4 +147,50 @@ export function toolImages(store: ImageFiles, ownTools: string[]): ExtensionFact
       };
     });
   };
+}
+
+/**
+ * Gives the MCP servers in `servers` images by name: where a call to one of their tools has the name of
+ * an image in `store`, as an argument or anywhere in one, the image goes in its place, in the form its
+ * server takes. Nested calls too, such as a codemode script's. pi hands the hook its own copy of the
+ * arguments, so the image stays out of the session.
+ */
+export function mcpImages(servers: Record<string, ImageForm>, store: ImageFiles): ExtensionFactory {
+  const forms = new Map(Object.entries(servers).map(([name, form]) => [`${mcpNamespace(name)}__`, form]));
+  return (pi) => {
+    pi.on('tool_call', async (event) => {
+      const form = [...forms].find(([prefix]) => event.toolName.startsWith(prefix))?.[1];
+      if (form) await replaceImages(event.input, form, store);
+      return undefined;
+    });
+  };
+}
+
+/** Might name an image: a file name, without directories, with an image's extension. */
+const IMAGE_NAME = /^[^/\\]+\.(?:png|jpe?g|webp|gif)$/i;
+
+/** Replaces the strings in `value` that name images in `store` with the images, in place. */
+async function replaceImages(value: unknown, form: ImageForm, store: ImageFiles): Promise<void> {
+  if (typeof value !== 'object' || value === null) return;
+  const entries = Object.entries(value as Record<string, unknown>);
+  await Promise.all(
+    entries.map(async ([key, item]) => {
+      if (typeof item !== 'string') return replaceImages(item, form, store);
+      if (!IMAGE_NAME.test(item)) return;
+      // Any other string, or a name of something the thread doesn't have, is left as it is.
+      const image = await imageIn(store, item, form).catch(() => undefined);
+      if (image !== undefined) (value as Record<string, unknown>)[key] = image;
+    }),
+  );
+}
+
+async function imageIn(store: ImageFiles, name: string, form: ImageForm): Promise<string> {
+  if (form === 'path') return store.path(name);
+  const [image] = await store.get([name]);
+  return form === 'base64' ? image!.data : `data:${image!.mimeType};base64,${image!.data}`;
+}
+
+/** Tool names are `mcp__<server>__<tool>`, with `-` in the server name replaced by `_`. */
+export function mcpNamespace(server: string): string {
+  return `mcp__${server.replace(/[^A-Za-z0-9_]/g, '_')}`;
 }
