@@ -206,7 +206,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           toolGuard(allowTools),
           ...(schedulerExtension && onScheduled ? [scheduler(schedulerExtension, onScheduled)] : []),
           ...(imageModel && imageStore ? [imageGeneration(modelRuntime, imageModel, imageStore)] : []),
-          ...(visionModel && imageStore ? [vision(modelRuntime, visionModel, config.visionModel!.thinkingLevel, imageStore)] : []),
+          ...(visionModel && imageStore ? [vision(modelRuntime, visionModel, config.visionModel!.thinkingLevel, imageStore, images)] : []),
           ...(imageTools && imageStore ? [toolImages(imageStore, ['generate_image', ...VISION_TOOLS]), mcpImages(serverImages, imageStore)] : []),
           withoutCwd(),
         ],
@@ -222,7 +222,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           images,
           imageGeneration: !!imageModel,
           imageEdits,
-          imageServers: Object.keys(serverImages),
+          imageServers: Object.fromEntries(Object.entries(serverImages).map(([name, args]) => [name, Object.keys(args)])),
           vision: !!visionModel,
           serverUrl: config.mattermost.publicUrl,
           rootId,
@@ -289,8 +289,8 @@ export interface SystemPromptOptions {
   imageGeneration: boolean;
   /** Whether generate_image takes images to change. */
   imageEdits: boolean;
-  /** The MCP servers that take images by name. */
-  imageServers: string[];
+  /** The MCP servers that take images by name, with the arguments they take them in. */
+  imageServers: Record<string, string[]>;
   /** Whether the agent has the vision tools. */
   vision: boolean;
   /** Where people open the server, for links. */
@@ -301,6 +301,7 @@ export interface SystemPromptOptions {
 
 export function buildSystemPrompt(options: SystemPromptOptions): string {
   const { botUsername, servers, scheduler, images, imageGeneration, imageEdits, imageServers, vision, serverUrl, rootId } = options;
+  const imageArguments = Object.entries(imageServers).map(([name, args]) => `${mcpNamespace(name)} in ${args.join(' or ')}`);
   return [
     `You are @${botUsername}, a Mattermost bot that gets things done with your tools.`,
     'Each user message holds one or more Mattermost posts from a thread, as "@username (time, post <id>): text". Several people can take part in one thread.',
@@ -332,9 +333,9 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
           'To learn what is in images in this thread, ask look_at_image, by their names. To work on a part of one, such as a barcode, a label or small text, find it with locate, and cut it out with crop_image: the new image can go to look_at_image, or to any tool that takes images.',
         ]
       : []),
-    ...(imageServers.length
+    ...(imageArguments.length
       ? [
-          `The tools of ${imageServers.map(mcpNamespace).join(', ')} take images by name: where one asks for an image, as a path, a URL or base64 data, give the name of an image in this thread, from its [image] line or the name it was saved as, and the image is passed on as the tool takes it.`,
+          `These tools take images by name, in these arguments: ${imageArguments.join('; ')}. Give the name of an image in this thread there, from its [image] line or the name it was saved as, never in another argument, and the image is passed on as the tool takes it.`,
         ]
       : []),
     ...directServers(servers),

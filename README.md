@@ -23,7 +23,7 @@ Set in `.env`:
 * `IMAGE_MODEL` - enables `generate_image`, with this model, as `provider/model` like `MODEL` but without thinking,
   for example `openrouter/bytedance-seed/seedream-5-0-pro`. See below
 * `VISION_MODEL` - enables `look_at_image`, `locate` and `crop_image`, with this model, which must take images, as
-  `provider/model[:thinking]` like `MODEL`, for example `openrouter/google/gemini-3-flash`. See below
+  `provider/model[:thinking]` like `MODEL`, for example `openrouter/qwen/qwen3-vl-235b-a22b-instruct`. See below
 * `MCP_CONFIG` - path to the tools configuration, below. Default `./mcp.json`, which may be missing
 * `DATA_DIR` - default `./data`. Each thread has a directory in `sessions/`, named after its root post, with its
   session in `session.jsonl` and its images in `images/`
@@ -113,10 +113,12 @@ not:
 * `crop_image` cuts a box out of an image, at its full size, as an image of its own, `<name>-crop.png`, which the
   agent can look closer at, or pass to any tool that takes images, such as an MCP server that reads barcodes
 
-Boxes are `[ymin, xmin, ymax, xmax]`, from 0 to 1000 of the image's height and width, as Gemini models give them.
-Qwen's `bbox_2d` boxes are read too, whether from 0 to 1000 or in pixels. Other models may answer in other ways:
-try `locate` with the one you pick. The vision model is sent images scaled down to its limits, while `crop_image`
-cuts from the image as it was posted or returned. These are tool calls, so only `allowedUsers` can have the agent
+Boxes are `[ymin, xmin, ymax, xmax]`, from 0 to 1000 of the image's height and width. The vision model is asked for
+them by name, as models trained to find things answer arrays in their own order whatever they're asked: Qwen 3 VL
+puts x first. Gemini's `box_2d` and Qwen's `bbox_2d` arrays are read too, from 0 to 1000 or in pixels. Models differ
+a lot at this: Qwen 3 VL and Gemma 4 find things well, while Claude Haiku 5.5 and Mistral Medium 3.5 only roughly,
+so try `locate` with the one you pick. The vision model is sent images scaled down to its limits, while `crop_image`
+cuts from the image as it was posted or returned, and shows the crop to the agent only when `MODEL` takes images. These are tool calls, so only `allowedUsers` can have the agent
 make them.
 
 ### Tools
@@ -175,7 +177,7 @@ shown to the model, whatever its exposure. `mcp.example.json` is a starting poin
 
 #### Images for MCP servers
 A server's tools can take the thread's images, which the agent gives them by name, as it does `generate_image`, with
-another addition: the server's `images`, saying how its tools take an image:
+another addition: the server's `images`, naming the arguments its tools take images in, and how each takes them:
 
 * `base64` - the image's data, in base64
 * `dataUrl` - a `data:` URL with it
@@ -184,15 +186,21 @@ another addition: the server's `images`, saying how its tools take an image:
 ```json
 {
   "mcpServers": {
-    "barcodes": { "command": "npx", "args": ["-y", "@cordfuse/barcoding-mcp"], "exposure": "direct", "images": "base64" }
+    "barcodes": {
+      "command": "npx",
+      "args": ["-y", "@cordfuse/barcoding-mcp"],
+      "exposure": "direct",
+      "images": { "base64": "base64" }
+    }
   }
 }
 ```
 
-Every string in a call to one of its tools that names an image in the thread, such as `"base64": "garage.png"`, for
-whichever argument the tool takes the image in, is replaced with the image, before the call reaches the server, and only there: the session keeps the name. Images
-are passed on whole, up to 20 MB for a posted one, which `base64` and `dataUrl` grow by a third, so a server may
-refuse large ones.
+A name of an image in the thread in one of those arguments, at any depth or in a list, such as `"base64":
+"garage.png"`, is replaced with the image before the call reaches the server, and only there: the session keeps the
+name. A name in any other argument stays a name, so a tool that takes a path, a URL or base64 data in arguments of
+their own doesn't get the image where it expects something else, and echo it back in an error. Images are passed on
+whole, up to 20 MB for a posted one, which `base64` and `dataUrl` grow by a third, so a server may refuse large ones.
 
 ### Scheduled jobs
 With `SCHEDULER=true`, the agent gets a `schedule` tool: "remind me at 6 to close the garage", "every morning, check

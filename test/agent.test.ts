@@ -22,7 +22,7 @@ test("lists what directly exposed servers offer, in the format of pi's mcp_serve
   assert.deepEqual(directServers({}), []);
 });
 
-const promptOptions = { botUsername: 'sailor', servers: {}, scheduler: false, images: false, imageGeneration: false, imageEdits: false, imageServers: [], vision: false, serverUrl: 'https://chat.example', rootId: 'r1' };
+const promptOptions = { botUsername: 'sailor', servers: {}, scheduler: false, images: false, imageGeneration: false, imageEdits: false, imageServers: {}, vision: false, serverUrl: 'https://chat.example', rootId: 'r1' };
 
 test('links posts without their team, and gives the model the thread\'s link', () => {
   assert.equal(permalink('https://chat.example', 'p1'), 'https://chat.example/_redirect/pl/p1');
@@ -50,7 +50,10 @@ test('tells the model about the vision tools only when it has them', () => {
 });
 
 test('tells the model which servers take images by name', () => {
-  assert.match(buildSystemPrompt({ ...promptOptions, imageServers: ['bar-codes', 'vision'] }), /The tools of mcp__bar_codes, mcp__vision take images by name/);
+  assert.match(
+    buildSystemPrompt({ ...promptOptions, imageServers: { 'bar-codes': ['base64'], vision: ['image', 'url'] } }),
+    /take images by name, in these arguments: mcp__bar_codes in base64; mcp__vision in image or url\./,
+  );
   assert.doesNotMatch(buildSystemPrompt(promptOptions), /take images by name/);
 });
 

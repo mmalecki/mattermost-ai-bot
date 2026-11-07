@@ -39,8 +39,11 @@ export interface ToolsConfig {
   allowedUsers: AllowedUsers | undefined;
   /** MCP servers in pi's `mcp.json` format, validated by pi when registered. */
   mcpServers: Record<string, McpServerConfig>;
-  /** How the enabled servers with an `images` setting take images, which the agent gives them by name. */
-  serverImages: Record<string, ImageForm>;
+  /**
+   * The arguments the enabled servers with an `images` setting take images in, which the agent gives them
+   * by name, and how each takes them.
+   */
+  serverImages: Record<string, ImageArguments>;
 }
 
 /** Usernames, and for each, whether they may have the agent call a tool, by its name. */
@@ -48,6 +51,8 @@ export type AllowedUsers = Map<string, (toolName: string) => boolean>;
 
 /** How a server's tools take an image: its base64 data, as a `data:` URL, or the path of its file. */
 export type ImageForm = 'base64' | 'dataUrl' | 'path';
+/** A server's arguments that take images, by name, at any depth, and how each takes them. */
+export type ImageArguments = Record<string, ImageForm>;
 const IMAGE_FORMS: readonly string[] = ['base64', 'dataUrl', 'path'] satisfies ImageForm[];
 
 /** A model a thread can run on, as MODEL names one. */
@@ -133,7 +138,7 @@ export function parseVisionModel(ref: string): ModelChoice {
   try {
     return parseModel(ref);
   } catch {
-    throw new Error(`VISION_MODEL must be provider/model[:thinking], such as openrouter/google/gemini-3-flash, not "${ref}"`);
+    throw new Error(`VISION_MODEL must be provider/model[:thinking], such as openrouter/qwen/qwen3-vl-235b-a22b-instruct, not "${ref}"`);
   }
 }
 
@@ -163,11 +168,14 @@ export function loadTools(path: string, required: boolean): ToolsConfig {
     throw new Error(`${path}: ${errorMessage(error)}`);
   }
   const mcpServers = (parsed.mcpServers ?? {}) as Record<string, McpServerConfig & { images?: unknown }>;
-  const serverImages: Record<string, ImageForm> = {};
+  const serverImages: Record<string, ImageArguments> = {};
   for (const [name, server] of Object.entries(mcpServers)) {
     if (!isRecord(server) || server.images === undefined) continue;
-    if (!IMAGE_FORMS.includes(server.images as string)) throw new Error(`${path}: server "${name}": "images" must be one of ${IMAGE_FORMS.join(', ')}`);
-    if (server.enabled !== false) serverImages[name] = server.images as ImageForm;
+    const { images } = server;
+    if (!isRecord(images) || !Object.keys(images).length || !Object.values(images).every((form) => IMAGE_FORMS.includes(form as string))) {
+      throw new Error(`${path}: server "${name}": "images" must map the arguments that take images to one of ${IMAGE_FORMS.join(', ')}`);
+    }
+    if (server.enabled !== false) serverImages[name] = images as ImageArguments;
   }
   return { allowedUsers, mcpServers, serverImages };
 }

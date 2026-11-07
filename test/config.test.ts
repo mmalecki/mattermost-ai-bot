@@ -59,9 +59,9 @@ for (const [name, key] of [['SCHEDULER', 'scheduler'], ['CODEMODE', 'codemode'],
 
 test('VISION_MODEL is a provider/model[:thinking], and unset by default', () => {
   assert.equal(loadConfig(base).visionModel, undefined);
-  assert.deepEqual(loadConfig({ ...base, VISION_MODEL: 'openrouter/google/gemini-3-flash:low' }).visionModel, {
+  assert.deepEqual(loadConfig({ ...base, VISION_MODEL: 'openrouter/google/gemini-3.7-flash:low' }).visionModel, {
     provider: 'openrouter',
-    model: 'google/gemini-3-flash',
+    model: 'google/gemini-3.7-flash',
     thinkingLevel: 'low',
   });
   assert.throws(() => parseVisionModel('gemini'), /VISION_MODEL must be provider\/model\[:thinking\]/);
@@ -104,13 +104,15 @@ test('allowedUsers can give each user their tools, by name or glob', () => {
 
 test('reads how enabled servers take images', () => {
   const servers = {
-    barcodes: { command: 'barcoding-mcp', images: 'base64' },
-    vision: { url: 'http://vision/mcp', images: 'path' },
-    off: { url: 'http://off/mcp', images: 'dataUrl', enabled: false },
+    barcodes: { command: 'barcoding-mcp', images: { base64: 'base64' } },
+    vision: { url: 'http://vision/mcp', images: { file: 'path', url: 'dataUrl' } },
+    off: { url: 'http://off/mcp', images: { url: 'dataUrl' }, enabled: false },
     home: { url: 'http://ha/api/mcp' },
   };
-  assert.deepEqual(loadTools(write({ mcpServers: servers }), true).serverImages, { barcodes: 'base64', vision: 'path' });
-  assert.throws(() => loadTools(write({ mcpServers: { x: { command: 'x', images: 'url' } } }), true), /server "x": "images" must be one of base64, dataUrl, path/);
+  assert.deepEqual(loadTools(write({ mcpServers: servers }), true).serverImages, { barcodes: { base64: 'base64' }, vision: { file: 'path', url: 'dataUrl' } });
+  for (const images of ['base64', {}, { image: 'url' }]) {
+    assert.throws(() => loadTools(write({ mcpServers: { x: { command: 'x', images } } }), true), /server "x": "images" must map the arguments that take images to one of base64, dataUrl, path/);
+  }
 });
 
 test('rejects malformed tool configs', () => {

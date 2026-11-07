@@ -1,7 +1,7 @@
 import { type ImageApi, type ImageContent, type ImageModel, Type } from '@earendil-works/pi-ai';
 import { defineTool, type ExtensionFactory, type McpServerConfig, type ModelRuntime } from '@earendil-works/pi-coding-agent';
+import type { ImageArguments, ImageForm } from './config.ts';
 import { textOf } from './content.ts';
-import type { ImageForm } from './config.ts';
 import { errorMessage } from './error.ts';
 import type { ImageFiles } from './images.ts';
 
@@ -151,16 +151,18 @@ export function toolImages(store: ImageFiles, ownTools: string[]): ExtensionFact
 
 /**
  * Gives the MCP servers in `servers` images by name: where a call to one of their tools has the name of
- * an image in `store`, as an argument or anywhere in one, the image goes in its place, in the form its
- * server takes. Nested calls too, such as a codemode script's. pi hands the hook its own copy of the
- * arguments, so the image stays out of the session.
+ * an image in `store` in one of the server's image arguments, at any depth, or in a list there, the image
+ * goes in its place, in the form the argument takes. Names elsewhere are left as they are, so an image
+ * never reaches an argument that takes something else, and is echoed back in an error. Nested calls too,
+ * such as a codemode script's. pi hands the hook its own copy of the arguments, so the image stays out
+ * of the session.
  */
-export function mcpImages(servers: Record<string, ImageForm>, store: ImageFiles): ExtensionFactory {
-  const forms = new Map(Object.entries(servers).map(([name, form]) => [`${mcpNamespace(name)}__`, form]));
+export function mcpImages(servers: Record<string, ImageArguments>, store: ImageFiles): ExtensionFactory {
+  const prefixes = Object.entries(servers).map(([name, args]) => [`${mcpNamespace(name)}__`, args] as const);
   return (pi) => {
     pi.on('tool_call', async (event) => {
-      const form = [...forms].find(([prefix]) => event.toolName.startsWith(prefix))?.[1];
-      if (form) await replaceImages(event.input, form, store);
+      const args = prefixes.find(([prefix]) => event.toolName.startsWith(prefix))?.[1];
+      if (args) await replaceImages(event.input, args, store);
       return undefined;
     });
   };
@@ -169,17 +171,19 @@ export function mcpImages(servers: Record<string, ImageForm>, store: ImageFiles)
 /** Might name an image: a file name, without directories, with an image's extension. */
 const IMAGE_NAME = /^[^/\\]+\.(?:png|jpe?g|webp|gif)$/i;
 
-/** Replaces the strings in `value` that name images in `store` with the images, in place. */
-async function replaceImages(value: unknown, form: ImageForm, store: ImageFiles): Promise<void> {
+/** Replaces the names of images in `store` in `value`'s image arguments, `args`, with the images, in place. */
+async function replaceImages(value: unknown, args: ImageArguments, store: ImageFiles, form?: ImageForm): Promise<void> {
   if (typeof value !== 'object' || value === null) return;
-  const entries = Object.entries(value as Record<string, unknown>);
+  const entries = Array.isArray(value) ? value.map((item, i) => [i, item] as const) : Object.entries(value);
   await Promise.all(
     entries.map(async ([key, item]) => {
-      if (typeof item !== 'string') return replaceImages(item, form, store);
-      if (!IMAGE_NAME.test(item)) return;
-      // Any other string, or a name of something the thread doesn't have, is left as it is.
-      const image = await imageIn(store, item, form).catch(() => undefined);
-      if (image !== undefined) (value as Record<string, unknown>)[key] = image;
+      // An image argument, or a list in one.
+      const itemForm = typeof key === 'string' && Object.hasOwn(args, key) ? args[key] : form;
+      if (typeof item !== 'string') return replaceImages(item, args, store, itemForm);
+      if (!itemForm || !IMAGE_NAME.test(item)) return;
+      // A name of something the thread doesn't have is left as it is.
+      const image = await imageIn(store, item, itemForm).catch(() => undefined);
+      if (image !== undefined) (value as Record<string | number, unknown>)[key] = image;
     }),
   );
 }
