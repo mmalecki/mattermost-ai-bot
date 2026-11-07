@@ -20,17 +20,46 @@ test('registers each configured MCP server, skipping ones pi rejects', (t) => {
   assert.equal(error.mock.callCount(), 1);
 });
 
+/** The tool guard's handlers, by event, on a pi whose active tools are `active`. */
+function guard(allowed: (toolName: string) => boolean, active: string[] = []) {
+  const handlers = new Map<string, (event: unknown) => unknown>();
+  const pi = {
+    active,
+    on: (event: string, handler: (event: unknown) => unknown) => void handlers.set(event, handler),
+    getActiveTools: () => pi.active,
+    setActiveTools(names: string[]) {
+      pi.active = names;
+      pi.sets++;
+    },
+    sets: 0,
+  };
+  toolGuard(allowed)(pi as unknown as ExtensionAPI);
+  return { pi, onToolCall: (toolName: string) => handlers.get('tool_call')!({ toolName }), emit: (event: string) => handlers.get(event)!({ type: event }) };
+}
+
 test('blocks every tool call unless allowed', () => {
   let allowed = true;
-  let onToolCall!: (event: { toolName: string }) => unknown;
-  const pi = { on: (_event: string, handler: typeof onToolCall) => (onToolCall = handler) };
-  toolGuard(() => allowed)(pi as unknown as ExtensionAPI);
-
-  assert.equal(onToolCall({ toolName: 'websearch' }), undefined);
+  const { onToolCall } = guard(() => allowed);
+  assert.equal(onToolCall('websearch'), undefined);
   allowed = false;
   for (const toolName of ['websearch', 'mcp__home__intent__HassTurnOn', 'codemode']) {
-    assert.deepEqual(onToolCall({ toolName }), blocked(toolName));
+    assert.deepEqual(onToolCall(toolName), blocked(toolName));
   }
+});
+
+test('takes the tools that are not allowed off the declared ones, before each run and turn', () => {
+  let allowed = (name: string) => name !== 'webfetch';
+  const { pi, emit } = guard((name) => allowed(name), ['websearch', 'webfetch', 'mcp__home__HassTurnOn']);
+  emit('before_agent_start');
+  assert.deepEqual(pi.active, ['websearch', 'mcp__home__HassTurnOn']);
+  // Nothing to take away: the loadout is left alone.
+  emit('turn_start');
+  assert.equal(pi.sets, 1);
+  // A tool registered meanwhile is taken off at the next turn.
+  pi.active = [...pi.active, 'mcp__slow__write'];
+  allowed = (name) => name === 'websearch';
+  emit('turn_start');
+  assert.deepEqual(pi.active, ['websearch']);
 });
 
 test("drops only pi's cwd section from the system prompt", () => {
@@ -40,11 +69,9 @@ test("drops only pi's cwd section from the system prompt", () => {
 });
 
 test('tells the guard which tool is called', () => {
-  let onToolCall!: (event: { toolName: string }) => unknown;
-  const pi = { on: (_event: string, handler: typeof onToolCall) => (onToolCall = handler) };
-  toolGuard((name) => name === 'websearch')(pi as unknown as ExtensionAPI);
-  assert.equal(onToolCall({ toolName: 'websearch' }), undefined);
-  assert.deepEqual(onToolCall({ toolName: 'mcp__home__intent__HassTurnOn' }), blocked('mcp__home__intent__HassTurnOn'));
+  const { onToolCall } = guard((name) => name === 'websearch');
+  assert.equal(onToolCall('websearch'), undefined);
+  assert.deepEqual(onToolCall('mcp__home__intent__HassTurnOn'), blocked('mcp__home__intent__HassTurnOn'));
 });
 
 const PAINTER = { provider: 'openrouter', id: 'google/gemini-2.5-flash-image', input: ['text'] } as ImageModel<ImageApi>;

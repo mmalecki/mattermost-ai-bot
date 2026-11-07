@@ -138,6 +138,11 @@ and `schedule`, and Pi's `codemode` and `tool_search`, which servers with `codem
 reached through. Tools called from `codemode` scripts are checked one by one too, but scripts can also use models, so
 give `codemode` only to those trusted with the rest.
 
+The model is shown only the tools the thread may use. Tools taken away in a thread that `allowedUsers` gives back later
+are shown again once its session is reopened, after it idles out or the bot restarts. `codemode` and `tool_search`
+still list every tool they reach, and calls to those that aren't allowed are blocked, as are calls to any other tool
+the model knows of.
+
 Values such as `${HASS_TOKEN}` are read from the environment, so secrets can stay in `.env`. As in Pi, a server's
 `exposure` defaults to `codemode`, where the model reaches its tools through scripts; `direct` declares them to the model
 like the built-in tools, which suits small models and small servers best. `codemode` is on only while some server has
