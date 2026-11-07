@@ -7,6 +7,16 @@ import type { ImageFiles } from './images.ts';
 /** The vision tools, which keep the images they make themselves. */
 export const VISION_TOOLS = ['look_at_image', 'locate', 'crop_image'];
 
+/**
+ * How much the vision model may say, so a model that repeats itself stops. Asked for short answers,
+ * it needs far less.
+ */
+const MAX_TOKENS = 2048;
+
+/** Asked of the vision model, which otherwise writes at length, and makes up what it can't read. */
+const SYSTEM_PROMPT =
+  "Answer briefly and factually, with what you see. Read text only as far as you can make it out, and say what you can't read, or aren't sure of, instead of guessing. Don't agree with what a question suggests unless the image shows it.";
+
 /** A box in an image: `[ymin, xmin, ymax, xmax]`, from 0 to 1000 of its height and width. */
 export type Box = [number, number, number, number];
 
@@ -36,14 +46,15 @@ export function vision(
     }
     const message = await models.completeSimple(
       model,
-      { messages: [{ role: 'user', content, timestamp: Date.now() }] },
-      { signal, ...(thinkingLevel !== 'off' ? { reasoning: thinkingLevel as ThinkingLevel } : {}) },
+      { systemPrompt: SYSTEM_PROMPT, messages: [{ role: 'user', content, timestamp: Date.now() }] },
+      { signal, maxTokens: MAX_TOKENS, ...(thinkingLevel !== 'off' ? { reasoning: thinkingLevel as ThinkingLevel } : {}) },
     );
     if (message.stopReason === 'error' || message.stopReason === 'aborted') throw new Error(message.errorMessage ?? `${model.id} ${message.stopReason}`);
-    const text = message.content
+    let text = message.content
       .flatMap((c) => (c.type === 'text' ? [c.text] : []))
       .join('')
       .trim();
+    if (message.stopReason === 'length') text += `\n[${model.id} was cut off here]`;
     return { text, sizes, usage: message.usage };
   };
   const details = { model: `${model.provider}/${model.id}` };
@@ -53,7 +64,7 @@ export function vision(
       defineTool({
         name: 'look_at_image',
         label: 'Look at Image',
-        description: `Asks ${model.id}, which sees images, a question about images in the thread, such as what one shows, or what text is in it. Ask for everything you need at once.`,
+        description: `Asks ${model.id}, which sees images, a question about images in the thread, such as what one shows, or what text is in it. Ask for everything you need at once. It can misread small or blurry text, and say what a question suggests: ask open questions, not whether it's something you have in mind, and check text it reads on a crop of it.`,
         promptSnippet: 'Ask a vision model about images in the thread',
         parameters: Type.Object({
           images: Type.Array(Type.String(), { description: 'Names of the images: posted ones, by the name on their [image] line, or ones you generated or a tool returned' }),
