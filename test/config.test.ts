@@ -61,7 +61,7 @@ test('MCP_CONFIG must exist when set; the default mcp.json may be missing', () =
   const dir = tempDir();
   const env = { ...base, MCP_CONFIG: join(dir, 'missing.json') };
   assert.throws(() => loadConfig(env), /does not exist/);
-  assert.deepEqual(loadTools(join(dir, 'mcp.json'), false), { allowedUsers: undefined, mcpServers: {} });
+  assert.deepEqual(loadTools(join(dir, 'mcp.json'), false), { allowedUsers: undefined, mcpServers: {}, serverImages: {} });
 });
 
 test("reads pi's mcp.json format with an allowedUsers list", () => {
@@ -70,6 +70,17 @@ test("reads pi's mcp.json format with an allowedUsers list", () => {
   assert.deepEqual([...tools.allowedUsers!], ['a', 'b']);
   assert.deepEqual(tools.mcpServers, { home: { url: 'http://ha/api/mcp', exposure: 'direct' } });
   assert.equal(loadTools(write({ mcpServers: {} }), true).allowedUsers, undefined);
+});
+
+test('reads how enabled servers take images', () => {
+  const servers = {
+    barcodes: { command: 'barcoding-mcp', images: 'base64' },
+    vision: { url: 'http://vision/mcp', images: 'path' },
+    off: { url: 'http://off/mcp', images: 'dataUrl', enabled: false },
+    home: { url: 'http://ha/api/mcp' },
+  };
+  assert.deepEqual(loadTools(write({ mcpServers: servers }), true).serverImages, { barcodes: 'base64', vision: 'path' });
+  assert.throws(() => loadTools(write({ mcpServers: { x: { command: 'x', images: 'url' } } }), true), /server "x": "images" must be one of base64, dataUrl, path/);
 });
 
 test('rejects malformed tool configs', () => {

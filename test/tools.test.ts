@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AssistantImages, ImageApi, ImageContent, ImageModel } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ToolDefinition } from '@earendil-works/pi-coding-agent';
-import { type ImageStore, imageGeneration, mcpServers, stripCwd, toolGuard, toolImages } from '../src/tools.ts';
+import { type ImageStore, imageGeneration, mcpImages, mcpServers, stripCwd, toolGuard, toolImages } from '../src/tools.ts';
 
 const BLOCKED = 'Tools are off in this thread: someone who has posted in it is not allowed to use them.';
 
@@ -161,4 +161,25 @@ test("other tools' images are kept as they returned them, and named in their res
   assert.equal(await onToolResult({ ...result, toolCallId: 'c2/1', parentToolCallId: 'c2' }), undefined);
   assert.equal(await onToolResult({ ...result, content: [{ type: 'text', text: 'hi' }] }), undefined);
   assert.equal(saved.length, 2);
+});
+
+test('MCP servers that take images get them in place of their names, in the form they take', async () => {
+  const { store } = fakeStore({ 'garage.png': PNG, 'scan.jpg': { type: 'image', data: 'anBn', mimeType: 'image/jpeg' } });
+  let onToolCall!: (event: { toolName: string; input: unknown }) => Promise<unknown>;
+  const pi = { on: (_event: string, handler: typeof onToolCall) => (onToolCall = handler) };
+  mcpImages({ 'bar-codes': 'base64', vision: 'dataUrl', files: 'path' }, store)(pi as unknown as ExtensionAPI);
+
+  const call = async (toolName: string, input: unknown) => {
+    assert.equal(await onToolCall({ toolName, input }), undefined);
+    return input;
+  };
+  assert.deepEqual(await call('mcp__bar_codes__decode', { base64: 'garage.png', note: 'garage.png is mine' }), { base64: 'cG5n', note: 'garage.png is mine' });
+  assert.deepEqual(await call('mcp__vision__describe', { images: [{ url: 'scan.jpg' }, 'garage.png'] }), {
+    images: [{ url: 'data:image/jpeg;base64,anBn' }, 'data:image/png;base64,cG5n'],
+  });
+  assert.deepEqual(await call('mcp__files__open', { path: 'garage.png' }), { path: '/images/garage.png' });
+  // Names the thread has no image under, and other servers' tools, are left as they are.
+  assert.deepEqual(await call('mcp__bar_codes__decode', { base64: 'other.png' }), { base64: 'other.png' });
+  assert.deepEqual(await call('mcp__home__look', { image: 'garage.png' }), { image: 'garage.png' });
+  assert.deepEqual(await call('mcp__vision_extra__look', { image: 'garage.png' }), { image: 'garage.png' });
 });

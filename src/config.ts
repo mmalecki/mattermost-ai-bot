@@ -36,7 +36,13 @@ export interface ToolsConfig {
   allowedUsers: Set<string> | undefined;
   /** MCP servers in pi's `mcp.json` format, validated by pi when registered. */
   mcpServers: Record<string, McpServerConfig>;
+  /** How the enabled servers with an `images` setting take images, which the agent gives them by name. */
+  serverImages: Record<string, ImageForm>;
 }
+
+/** How a server's tools take an image: its base64 data, as a `data:` URL, or the path of its file. */
+export type ImageForm = 'base64' | 'dataUrl' | 'path';
+const IMAGE_FORMS: readonly string[] = ['base64', 'dataUrl', 'path'] satisfies ImageForm[];
 
 /** A model a thread can run on, as MODEL names one. */
 export type ModelChoice = Pick<Config['llm'], 'provider' | 'model' | 'thinkingLevel'>;
@@ -115,11 +121,14 @@ export function parseImageModel(ref: string): NonNullable<Config['imageModel']> 
   return { provider: parsed.provider, model: parsed.model };
 }
 
-/** Reads pi's `mcp.json` format, plus a top-level `allowedUsers` list that gates every tool call. */
+/**
+ * Reads pi's `mcp.json` format, plus a top-level `allowedUsers` list that gates every tool call, and an
+ * `images` setting on a server, which pi ignores.
+ */
 export function loadTools(path: string, required: boolean): ToolsConfig {
   if (!existsSync(path)) {
     if (required) throw new Error(`${path} does not exist`);
-    return { allowedUsers: undefined, mcpServers: {} };
+    return { allowedUsers: undefined, mcpServers: {}, serverImages: {} };
   }
   let parsed: unknown;
   try {
@@ -134,9 +143,17 @@ export function loadTools(path: string, required: boolean): ToolsConfig {
   if (allowedUsers !== undefined && !(Array.isArray(allowedUsers) && allowedUsers.every((u) => typeof u === 'string'))) {
     throw new Error(`${path}: "allowedUsers" must be a list of usernames`);
   }
+  const mcpServers = (parsed.mcpServers ?? {}) as Record<string, McpServerConfig & { images?: unknown }>;
+  const serverImages: Record<string, ImageForm> = {};
+  for (const [name, server] of Object.entries(mcpServers)) {
+    if (!isRecord(server) || server.images === undefined) continue;
+    if (!IMAGE_FORMS.includes(server.images as string)) throw new Error(`${path}: server "${name}": "images" must be one of ${IMAGE_FORMS.join(', ')}`);
+    if (server.enabled !== false) serverImages[name] = server.images as ImageForm;
+  }
   return {
     allowedUsers: allowedUsers && new Set(allowedUsers.map((u) => u.trim().replace(/^@/, '')).filter(Boolean)),
-    mcpServers: (parsed.mcpServers ?? {}) as Record<string, McpServerConfig>,
+    mcpServers,
+    serverImages,
   };
 }
 
