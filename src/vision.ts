@@ -14,9 +14,15 @@ export type Box = [number, number, number, number];
  * `look_at_image`, `locate` and `crop_image`: the agent asks `model`, a chat model that takes images,
  * about the images in `store`, finds things in them as boxes, and cuts boxes out as images of their
  * own, which `store` keeps for other tools to take. So a model that doesn't take images can use them,
- * and one that does can look closer.
+ * and one that does can look closer: crops are shown to the agent when it `seesImages`.
  */
-export function vision(models: Pick<ModelRuntime, 'completeSimple'>, model: Model<Api>, thinkingLevel: ModelChoice['thinkingLevel'], store: ImageFiles): ExtensionFactory {
+export function vision(
+  models: Pick<ModelRuntime, 'completeSimple'>,
+  model: Model<Api>,
+  thinkingLevel: ModelChoice['thinkingLevel'],
+  store: ImageFiles,
+  seesImages: boolean,
+): ExtensionFactory {
   /** `model`'s answer to `prompt` about the images `names` names, each scaled down to its limits. */
   const ask = async (prompt: string, names: string[], signal: AbortSignal | undefined) => {
     const content: (ImageContent | { type: 'text'; text: string })[] = [{ type: 'text', text: prompt }];
@@ -73,7 +79,8 @@ export function vision(models: Pick<ModelRuntime, 'completeSimple'>, model: Mode
           what: Type.String({ description: 'What to find, such as "barcodes", "the price tag" or "every face"' }),
         }),
         async execute(_toolCallId, { image, what }, signal) {
-          const prompt = `Find ${what} in the image. Answer only with a JSON array, with an item for each one found: {"label": "<what it is>", "box_2d": [ymin, xmin, ymax, xmax]}, with coordinates from 0 to 1000 of the image's height and width. Answer [] when there is none.`;
+          // Named, as models give arrays in the order they were trained on, whatever they're asked for.
+          const prompt = `Find ${what} in the image. Answer only with a JSON array, with an item for each one found: {"label": "<what it is>", "ymin": <top>, "xmin": <left>, "ymax": <bottom>, "xmax": <right>}, with coordinates from 0 to 1000 of the image's height (y) and width (x). Answer [] when there is none.`;
           const { text, sizes, usage } = await ask(prompt, [image], signal);
           const boxes = parseBoxes(text, sizes[0]!);
           const found = boxes.length ? `Found in ${image}, as [ymin, xmin, ymax, xmax] from 0 to 1000:\n${JSON.stringify(boxes)}` : `${model.id} found none in ${image}.`;
@@ -109,7 +116,8 @@ export function vision(models: Pick<ModelRuntime, 'completeSimple'>, model: Mode
           const cropped = crop(source!, box as Box, margin);
           const name = await store.save(`${image.replace(/\.[^.]*$/, '')}-crop`, cropped.image);
           return {
-            content: [{ type: 'text', text: `Saved as ${name}, ${cropped.width}x${cropped.height}, which you can pass to tools that take images.` }, cropped.image],
+            // Only to an agent that sees it: otherwise it would be kept in the session for nothing.
+            content: [{ type: 'text', text: `Saved as ${name}, ${cropped.width}x${cropped.height}, which you can pass to tools that take images.` }, ...(seesImages ? [cropped.image] : [])],
             details: { name, width: cropped.width, height: cropped.height },
           };
         },
@@ -126,9 +134,9 @@ function withList(args: unknown, key: string): never {
 
 /**
  * The boxes a model answered with, from the JSON array in `text`, rounded and in order. Asked for
- * `box_2d` as `[ymin, xmin, ymax, xmax]` from 0 to 1000, as Gemini gives them; Qwen's `bbox_2d` is
- * `[xmin, ymin, xmax, ymax]`. Coordinates past 1000 are taken as pixels of the image the model saw,
- * of `size`, as Qwen 2.5 gives them. Items that aren't boxes are left out.
+ * `ymin`, `xmin`, `ymax` and `xmax` from 0 to 1000; Gemini's `box_2d` is `[ymin, xmin, ymax, xmax]`, and
+ * Qwen's `bbox_2d` `[xmin, ymin, xmax, ymax]`. Coordinates past 1000 are taken as pixels of the image
+ * the model saw, of `size`, as Qwen 2.5 gives them. Items that aren't boxes are left out.
  */
 export function parseBoxes(text: string, size: { width: number; height: number }): { label: string; box: Box }[] {
   const start = text.indexOf('[');
@@ -142,10 +150,14 @@ export function parseBoxes(text: string, size: { width: number; height: number }
   if (!Array.isArray(items)) return [];
   return items.flatMap((item) => {
     if (typeof item !== 'object' || item === null) return [];
-    const { label, box_2d, bbox_2d } = item as { label?: unknown; box_2d?: unknown; bbox_2d?: unknown };
-    const raw = box_2d ?? bbox_2d;
+    const { label, box_2d, bbox_2d, ...named } = item as Record<string, unknown>;
+    // As [ymin, xmin, ymax, xmax].
+    const raw =
+      named.ymin !== undefined
+        ? [named.ymin, named.xmin, named.ymax, named.xmax]
+        : (box_2d ?? (Array.isArray(bbox_2d) ? [bbox_2d[1], bbox_2d[0], bbox_2d[3], bbox_2d[2]] : undefined));
     if (!Array.isArray(raw) || raw.length !== 4 || !raw.every((n) => typeof n === 'number' && Number.isFinite(n))) return [];
-    let [ymin, xmin, ymax, xmax] = box_2d ? (raw as number[]) : [raw[1], raw[0], raw[3], raw[2]];
+    let [ymin, xmin, ymax, xmax] = raw as number[];
     if (raw.some((n) => n > 1000)) {
       [ymin, xmin, ymax, xmax] = [(ymin! / size.height) * 1000, (xmin! / size.width) * 1000, (ymax! / size.height) * 1000, (xmax! / size.width) * 1000];
     }

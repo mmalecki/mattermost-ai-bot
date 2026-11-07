@@ -27,6 +27,12 @@ function pixel(image: ImageContent, x: number, y: number): number[] {
   return rgba;
 }
 
+test('reads boxes with named coordinates, as asked for', () => {
+  const size = { width: 800, height: 600 };
+  assert.deepEqual(parseBoxes('```json\n[{"label": "barcode", "ymin": 573, "xmin": 597, "ymax": 809.4, "xmax": 894}]\n```', size), [{ label: 'barcode', box: [573, 597, 809, 894] }]);
+  assert.deepEqual(parseBoxes('[{"ymin": 1, "xmin": 2, "ymax": 3}]', size), []);
+});
+
 test('reads boxes as Gemini gives them, in JSON or a code block', () => {
   const size = { width: 800, height: 600 };
   assert.deepEqual(parseBoxes('[{"label": "barcode", "box_2d": [100, 200, 300.4, 400]}]', size), [{ label: 'barcode', box: [100, 200, 300, 400] }]);
@@ -66,10 +72,13 @@ test('crops a box out of an image at its full size, with a margin', () => {
   assert.throws(() => crop(image, [500, 500, 500, 600]), /The box \[500,500,500,600\] is empty/);
 });
 
-const MODEL = { provider: 'openrouter', id: 'google/gemini-3-flash', input: ['text', 'image'] } as Model<Api>;
+const MODEL = { provider: 'openrouter', id: 'google/gemini-3.7-flash', input: ['text', 'image'] } as Model<Api>;
 
-/** The vision tools, with a model that answers `answer`, and a store that holds `stored` images. */
-function tools(answer: string, stored: Record<string, ImageContent> = {}, thinkingLevel: 'off' | 'low' = 'off') {
+/**
+ * The vision tools, with a model that answers `answer`, a store that holds `stored` images, and an agent
+ * that sees images unless `seesImages` is false.
+ */
+function tools(answer: string, stored: Record<string, ImageContent> = {}, thinkingLevel: 'off' | 'low' = 'off', seesImages = true) {
   const requests: { context: Context; options: unknown }[] = [];
   const models = {
     async completeSimple(_model: unknown, context: Context, options: unknown) {
@@ -95,7 +104,7 @@ function tools(answer: string, stored: Record<string, ImageContent> = {}, thinki
   };
   const registered = new Map<string, ToolDefinition>();
   const pi = { registerTool: (tool: ToolDefinition) => registered.set(tool.name, tool) };
-  vision(models, MODEL, thinkingLevel, store)(pi as unknown as ExtensionAPI);
+  vision(models, MODEL, thinkingLevel, store, seesImages)(pi as unknown as ExtensionAPI);
   const run = (name: string, params: object) => registered.get(name)!.execute('t1', params, undefined, undefined, {} as never);
   return { requests, saved, registered, run };
 }
@@ -121,12 +130,12 @@ test('locate gives the boxes the vision model finds', async () => {
   const found = tools('```json\n[{"label": "barcode", "box_2d": [10, 20, 30, 40]}]\n```', { 'can.jpg': png(40, 20) });
   const result = await found.run('locate', { image: 'can.jpg', what: 'barcodes' });
   assert.deepEqual(result.content, [{ type: 'text', text: 'Found in can.jpg, as [ymin, xmin, ymax, xmax] from 0 to 1000:\n[{"label":"barcode","box":[10,20,30,40]}]' }]);
-  assert.match((found.requests[0]!.context.messages[0]!.content as { text: string }[])[0]!.text, /^Find barcodes in the image\. Answer only with a JSON array/);
+  assert.match((found.requests[0]!.context.messages[0]!.content as { text: string }[])[0]!.text, /^Find barcodes in the image\. Answer only with a JSON array, .*"ymin": <top>/);
   // Without thinking, none is asked for.
   assert.deepEqual(found.requests[0]!.options, { signal: undefined });
 
   const none = await tools('[]', { 'can.jpg': png(40, 20) }).run('locate', { image: 'can.jpg', what: 'barcodes' });
-  assert.deepEqual(none.content, [{ type: 'text', text: 'google/gemini-3-flash found none in can.jpg.' }]);
+  assert.deepEqual(none.content, [{ type: 'text', text: 'google/gemini-3.7-flash found none in can.jpg.' }]);
 });
 
 test('crop_image keeps the box as an image of its own, named after the image', async () => {
@@ -136,4 +145,10 @@ test('crop_image keeps the box as an image of its own, named after the image', a
   assert.equal(saved[0]!.name, 'can-crop.png');
   assert.deepEqual(result.content, [{ type: 'text', text: 'Saved as can-crop.png, 100x50, which you can pass to tools that take images.' }, saved[0]!.image]);
   assert.deepEqual(registered.get('crop_image')!.prepareArguments!({ image: 'can.jpg', box: '[1, 2, 3, 4]' }), { image: 'can.jpg', box: [1, 2, 3, 4] });
+
+  // Kept, but not shown to an agent that doesn't see images.
+  const blind = tools('', { 'can.jpg': png(200, 100) }, 'off', false);
+  const unseen = await blind.run('crop_image', { image: 'can.jpg', box: [0, 0, 500, 500] });
+  assert.deepEqual(unseen.content, [{ type: 'text', text: 'Saved as can-crop.png, 100x50, which you can pass to tools that take images.' }]);
+  assert.equal(blind.saved.length, 1);
 });
