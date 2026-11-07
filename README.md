@@ -22,6 +22,8 @@ Set in `.env`:
 * `PARALLEL_API_KEY` - enables `websearch` through [Parallel](https://parallel.ai)
 * `IMAGE_MODEL` - enables `generate_image`, with this model, as `provider/model` like `MODEL` but without thinking,
   for example `openrouter/bytedance-seed/seedream-5-0-pro`. See below
+* `VISION_MODEL` - enables `look_at_image`, `locate` and `crop_image`, with this model, which must take images, as
+  `provider/model[:thinking]` like `MODEL`, for example `openrouter/google/gemini-3-flash`. See below
 * `MCP_CONFIG` - path to the tools configuration, below. Default `./mcp.json`, which may be missing
 * `DATA_DIR` - default `./data`. Each thread has a directory in `sessions/`, named after its root post, with its
   session in `session.jsonl` and its images in `images/`
@@ -100,6 +102,21 @@ Pi generates images only through OpenRouter so far: `IMAGE_MODEL` is one of
 [its image models](https://openrouter.ai/models?output_modalities=image), and needs `OPENROUTER_API_KEY` whatever
 `MODEL` is. OpenRouter refuses models its account's [data policy](https://openrouter.ai/settings/privacy), such as zero
 data retention, rules out.
+
+### Recognizing images
+With `VISION_MODEL` set, the agent gets tools to work with the thread's images by name, whether `MODEL` takes images or
+not:
+
+* `look_at_image` asks the vision model about images, such as what one shows, or the text in it
+* `locate` has it find things in an image, such as barcodes, a price tag or every face, as boxes
+* `crop_image` cuts a box out of an image, at its full size, as an image of its own, `<name>-crop.png`, which the
+  agent can look closer at, or pass to any tool that takes images, such as an MCP server that reads barcodes
+
+Boxes are `[ymin, xmin, ymax, xmax]`, from 0 to 1000 of the image's height and width, as Gemini models give them.
+Qwen's `bbox_2d` boxes are read too, whether from 0 to 1000 or in pixels. Other models may answer in other ways:
+try `locate` with the one you pick. The vision model is sent images scaled down to its limits, while `crop_image`
+cuts from the image as it was posted or returned. These are tool calls, so only `allowedUsers` can have the agent
+make them.
 
 ### Tools
 `mcp.json` uses [Pi's MCP configuration format](https://pi.dev/docs/latest/mcp), with one addition: `allowedUsers`, the

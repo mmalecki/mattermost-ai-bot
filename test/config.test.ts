@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
-import { loadConfig, loadTools, parseImageModel, parseModel } from '../src/config.ts';
+import { loadConfig, loadTools, parseImageModel, parseModel, parseVisionModel } from '../src/config.ts';
 
 const base = { MATTERMOST_URL: 'http://mm.local/', MATTERMOST_TOKEN: 'mm', MODEL: 'mistral/mistral-small-2603' };
 
@@ -56,6 +56,16 @@ for (const [name, key] of [['SCHEDULER', 'scheduler'], ['CODEMODE', 'codemode'],
     assert.throws(() => loadConfig({ ...base, [name]: 'yes' }), new RegExp(`${name} must be true or false`));
   });
 }
+
+test('VISION_MODEL is a provider/model[:thinking], and unset by default', () => {
+  assert.equal(loadConfig(base).visionModel, undefined);
+  assert.deepEqual(loadConfig({ ...base, VISION_MODEL: 'openrouter/google/gemini-3-flash:low' }).visionModel, {
+    provider: 'openrouter',
+    model: 'google/gemini-3-flash',
+    thinkingLevel: 'low',
+  });
+  assert.throws(() => parseVisionModel('gemini'), /VISION_MODEL must be provider\/model\[:thinking\]/);
+});
 
 test('MCP_CONFIG must exist when set; the default mcp.json may be missing', () => {
   const dir = tempDir();

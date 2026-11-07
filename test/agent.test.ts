@@ -22,7 +22,7 @@ test("lists what directly exposed servers offer, in the format of pi's mcp_serve
   assert.deepEqual(directServers({}), []);
 });
 
-const promptOptions = { botUsername: 'sailor', servers: {}, scheduler: false, images: false, imageGeneration: false, imageEdits: false, imageServers: [], serverUrl: 'https://chat.example', rootId: 'r1' };
+const promptOptions = { botUsername: 'sailor', servers: {}, scheduler: false, images: false, imageGeneration: false, imageEdits: false, imageServers: [], vision: false, serverUrl: 'https://chat.example', rootId: 'r1' };
 
 test('links posts without their team, and gives the model the thread\'s link', () => {
   assert.equal(permalink('https://chat.example', 'p1'), 'https://chat.example/_redirect/pl/p1');
@@ -44,6 +44,11 @@ test('tells the model how to give generate_image images only when it takes them'
   assert.doesNotMatch(buildSystemPrompt({ ...promptOptions, imageGeneration: true }), /pass it to generate_image/);
 });
 
+test('tells the model about the vision tools only when it has them', () => {
+  assert.match(buildSystemPrompt({ ...promptOptions, vision: true }), /ask look_at_image/);
+  assert.doesNotMatch(buildSystemPrompt(promptOptions), /look_at_image/);
+});
+
 test('tells the model which servers take images by name', () => {
   assert.match(buildSystemPrompt({ ...promptOptions, imageServers: ['bar-codes', 'vision'] }), /The tools of mcp__bar_codes, mcp__vision take images by name/);
   assert.doesNotMatch(buildSystemPrompt(promptOptions), /take images by name/);
@@ -55,15 +60,18 @@ after(() => dirs.forEach((dir) => rmSync(dir, { recursive: true, force: true }))
 
 /**
  * An OpenAI-compatible endpoint that answers every request with "hello", streamed as pi asks for it.
- * `models` are the models asked for, in order.
+ * `models` are the models asked for, in order, and `tools` the tools each request offered.
  */
 async function fakeLlm() {
   const models: string[] = [];
+  const tools: string[][] = [];
   const server = createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => (body += chunk));
     req.on('end', () => {
-      models.push((JSON.parse(body) as { model: string }).model);
+      const request = JSON.parse(body) as { model: string; tools?: { function: { name: string } }[] };
+      models.push(request.model);
+      tools.push((request.tools ?? []).map((t) => t.function.name));
       const chunk = (delta: object, finish: string | null) =>
         `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', created: 0, model: 'm', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
       res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -72,11 +80,14 @@ async function fakeLlm() {
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
-  return { url: `http://127.0.0.1:${port}/v1`, models, close: () => server.close() };
+  return { url: `http://127.0.0.1:${port}/v1`, models, tools, close: () => server.close() };
 }
 
-/** An agent in `dir` on `local/small`, from a models.json that also has `local/large`, which takes images. */
-async function localAgent(baseUrl = 'http://127.0.0.1:1/v1', dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-'))) {
+/**
+ * An agent in `dir` on `local/small`, from a models.json that also has `local/large`, which takes images,
+ * with `env` added to its environment.
+ */
+async function localAgent({ baseUrl = 'http://127.0.0.1:1/v1', dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-')), env: extraEnv = {} }: { baseUrl?: string; dir?: string; env?: Record<string, string> } = {}) {
   dirs.push(dir);
   const models = [
     { id: 'small', contextWindow: 8192, reasoning: true },
@@ -84,7 +95,7 @@ async function localAgent(baseUrl = 'http://127.0.0.1:1/v1', dir = mkdtempSync(j
   ];
   writeFileSync(join(dir, 'models.json'), JSON.stringify({ providers: { local: { baseUrl, api: 'openai-completions', apiKey: 'none', models } } }));
   writeFileSync(join(dir, 'mcp.json'), '{}');
-  const env = { MATTERMOST_URL: 'http://mm.local', MATTERMOST_TOKEN: 'mm', MODEL: 'local/small', MCP_CONFIG: join(dir, 'mcp.json'), DATA_DIR: dir };
+  const env = { MATTERMOST_URL: 'http://mm.local', MATTERMOST_TOKEN: 'mm', MODEL: 'local/small', MCP_CONFIG: join(dir, 'mcp.json'), DATA_DIR: dir, ...extraEnv };
   return { agent: await createAgent(loadConfig(env), 'sailor'), dir };
 }
 
@@ -99,7 +110,7 @@ test('picks models pi knows, and only names providers it knows as models', async
 test('a session runs on the model it was created with, MODEL by default', async (t) => {
   const llm = await fakeLlm();
   t.after(llm.close);
-  const { agent, dir } = await localAgent(llm.url);
+  const { agent, dir } = await localAgent({ baseUrl: llm.url });
   const options = { allowTools: () => false };
   const large = { provider: 'local', model: 'large', thinkingLevel: 'high' } as const;
 
@@ -125,6 +136,23 @@ test('a session runs on the model it was created with, MODEL by default', async 
   assert.deepEqual(llm.models, ['large']);
 
   // A restarted bot finds the threads that have sessions on disk.
-  const { agent: restarted } = await localAgent(llm.url, dir);
+  const { agent: restarted } = await localAgent({ baseUrl: llm.url, dir });
   assert.deepEqual([restarted.hasSession('r1'), restarted.hasSession('r2')], [true, false]);
+});
+
+test('VISION_MODEL gives sessions the vision tools, and must take images', async (t) => {
+  await assert.rejects(localAgent({ env: { VISION_MODEL: 'local/small' } }), /VISION_MODEL local\/small doesn't take images/);
+  await assert.rejects(localAgent({ env: { VISION_MODEL: 'local/huge' } }), /VISION_MODEL local\/huge is neither in pi's catalog/);
+
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent } = await localAgent({ baseUrl: llm.url, env: { VISION_MODEL: 'local/large:low' } });
+  assert.equal(agent.imageTools, true);
+  const imageStore = { ...agent.images('r1'), attach: () => {} };
+  const session = await agent.openSession('r1', { allowTools: () => true, imageStore });
+  await session.prompt('hi');
+  for (const tool of ['look_at_image', 'locate', 'crop_image']) assert.ok(llm.tools[0]!.includes(tool), tool);
+  await session.close();
+
+  assert.equal((await localAgent()).agent.imageTools, false);
 });
