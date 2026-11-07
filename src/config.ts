@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { CreateAgentSessionOptions, McpServerConfig } from '@earendil-works/pi-coding-agent';
+import micromatch from 'micromatch';
 import { errorMessage } from './error.ts';
 
 export interface Config {
@@ -38,8 +39,8 @@ export interface ToolsConfig {
   mcpServers: Record<string, McpServerConfig>;
 }
 
-/** Usernames, and for each, a pattern matching the names of the tools they may have the agent call. */
-export type AllowedUsers = Map<string, RegExp>;
+/** Usernames, and for each, whether they may have the agent call a tool, by its name. */
+export type AllowedUsers = Map<string, (toolName: string) => boolean>;
 
 /** A model a thread can run on, as MODEL names one. */
 export type ModelChoice = Pick<Config['llm'], 'provider' | 'model' | 'thinkingLevel'>;
@@ -147,8 +148,8 @@ export function loadTools(path: string, required: boolean): ToolsConfig {
 
 /**
  * `allowedUsers` from `mcp.json`: `["alice", "bob"]`, who may use every tool, or
- * `{ "alice": "*", "mail": ["mcp__parcels__*"] }`, with each user's tools as a name or pattern, or a
- * list of them. In a pattern, `*` matches any characters. Usernames may start with `@`.
+ * `{ "alice": "*", "mail": ["mcp__parcels__*"] }`, with each user's tools as a name or glob, or a
+ * list of them, as micromatch takes them. Usernames may start with `@`.
  */
 export function parseAllowedUsers(value: unknown): AllowedUsers {
   const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === 'string');
@@ -169,16 +170,14 @@ export function parseAllowedUsers(value: unknown): AllowedUsers {
     const name = user.trim().replace(/^@/, '');
     if (name) tools.set(name, [...(tools.get(name) ?? []), ...patterns]);
   }
-  return new Map([...tools].map(([user, patterns]) => [user, toolPattern(patterns)]));
+  return new Map([...tools].map(([user, patterns]) => [user, toolMatcher(patterns)]));
 }
 
-/** Matches tool names that are one of `patterns`, where `*` matches any characters. None matches nothing. */
-function toolPattern(patterns: string[]): RegExp {
-  const alternatives = patterns
-    .map((p) => p.trim())
-    .filter(Boolean)
-    .map((p) => p.split('*').map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*'));
-  return new RegExp(alternatives.length ? `^(?:${alternatives.join('|')})$` : '(?!)');
+/** Whether a tool name matches one of `patterns`, globs as micromatch takes them. None matches nothing. */
+function toolMatcher(patterns: string[]): (toolName: string) => boolean {
+  // `dot`, so that `*` matches every name.
+  const matchers = patterns.map((p) => p.trim()).filter(Boolean).map((p) => micromatch.matcher(p, { dot: true }));
+  return (toolName) => matchers.some((matches) => matches(toolName));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -360,7 +360,7 @@ class Thread {
     const ids = new Set([...seen.userIds, ...userIds]);
     const names = await Promise.all([...ids].map((id) => chat.username(id).catch(() => undefined)));
     const patterns = names.map((name) => (name === undefined ? undefined : allowedUsers.get(name)));
-    this.#allowed = patterns.every((p) => p !== undefined) ? (toolName) => patterns.every((p) => p.test(toolName)) : () => false;
+    this.#allowed = patterns.every((may) => may !== undefined) ? (toolName) => patterns.every((may) => may(toolName)) : () => false;
   }
 
   async #answer(session: ThreadSession, prompt: string, images: ImageContent[] = []): Promise<void> {

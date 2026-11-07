@@ -68,18 +68,27 @@ test("reads pi's mcp.json format with an allowedUsers list, who may use every to
   const path = write({ allowedUsers: ['@a', ' b', ''], mcpServers: { home: { url: 'http://ha/api/mcp', exposure: 'direct' } } });
   const tools = loadTools(path, true);
   assert.deepEqual([...tools.allowedUsers!.keys()], ['a', 'b']);
-  assert.ok(tools.allowedUsers!.get('a')!.test('mcp__home__HassTurnOn'));
+  assert.ok(tools.allowedUsers!.get('a')!('mcp__home__HassTurnOn'));
   assert.deepEqual(tools.mcpServers, { home: { url: 'http://ha/api/mcp', exposure: 'direct' } });
   assert.equal(loadTools(write({ mcpServers: {} }), true).allowedUsers, undefined);
 });
 
-test('allowedUsers can give each user their tools, by name or pattern', () => {
-  const users = parseAllowedUsers({ '@alice': '*', mail: ['mcp__parcels__add_*', 'websearch'], 'mail ': 'web.fetch', guest: [], ' ': '*' });
-  const may = (user: string) => ['websearch', 'webfetch', 'web.fetch', 'mcp__parcels__add_observations', 'mcp__parcels__read_graph', 'xwebsearch'].filter((t) => users.get(user)!.test(t));
-  assert.deepEqual([...users.keys()], ['alice', 'mail', 'guest']);
-  assert.deepEqual(may('alice'), ['websearch', 'webfetch', 'web.fetch', 'mcp__parcels__add_observations', 'mcp__parcels__read_graph', 'xwebsearch']);
+test('allowedUsers can give each user their tools, by name or glob', () => {
+  const users = parseAllowedUsers({
+    '@alice': '*',
+    mail: ['mcp__parcels__add_*', 'websearch'],
+    'mail ': 'web.fetch',
+    home: 'mcp__home__{HassTurnOn,HassTurnOff}',
+    guest: [],
+    ' ': '*',
+  });
+  const TOOLS = ['websearch', 'webfetch', 'web.fetch', '.hidden', 'mcp__parcels__add_observations', 'mcp__parcels__read_graph', 'mcp__home__HassTurnOn', 'xwebsearch'];
+  const may = (user: string) => TOOLS.filter((t) => users.get(user)!(t));
+  assert.deepEqual([...users.keys()], ['alice', 'mail', 'home', 'guest']);
+  assert.deepEqual(may('alice'), TOOLS);
   // `.` is no wildcard, and a username given twice gets both entries' tools.
   assert.deepEqual(may('mail'), ['websearch', 'web.fetch', 'mcp__parcels__add_observations']);
+  assert.deepEqual(may('home'), ['mcp__home__HassTurnOn']);
   assert.deepEqual(may('guest'), []);
 });
 

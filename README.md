@@ -118,9 +118,10 @@ tool.
 ```
 
 To give users only some tools, make `allowedUsers` an object, with each user's tools as a name, or a list of names,
-where `*` matches any characters. A thread then has only the tools everyone who has posted in it may use. For example,
-a mailbox bridge like [mail2most](https://github.com/Virtomize/mail2most), posting emails for the agent to file away,
-can be kept to the write tools of one server with `direct` exposure, even in a thread where `alice` has posted too:
+which can be [globs](https://github.com/micromatch/micromatch#matching-features) such as `mcp__homeassistant__*`. A
+thread then has only the tools everyone who has posted in it may use. For example, a mailbox bridge like
+[mail2most](https://github.com/Virtomize/mail2most), posting emails for the agent to file away, can be kept to the write
+tools of one server with `direct` exposure, even in a thread where `alice` has posted too:
 
 ```json
 {
