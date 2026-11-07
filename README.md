@@ -22,8 +22,9 @@ Set in `.env`:
 * `PARALLEL_API_KEY` - enables `websearch` through [Parallel](https://parallel.ai)
 * `IMAGE_MODEL` - enables `generate_image`, with this model, as `provider/model` like `MODEL` but without thinking,
   for example `openrouter/bytedance-seed/seedream-5-0-pro`. See below
-* `VISION_MODEL` - enables `look_at_image`, `locate` and `crop_image`, with this model, which must take images, as
-  `provider/model[:thinking]` like `MODEL`, for example `openrouter/qwen/qwen3-vl-235b-a22b-instruct`. See below
+* `VISION_MODEL` - enables `locate`, and `look_at_image` and `crop_image` where the thread's model doesn't take
+  images, with this model, which must take images, as `provider/model[:thinking]` like `MODEL`, for example
+  `openrouter/qwen/qwen3-vl-235b-a22b-instruct`. See below
 * `MCP_CONFIG` - path to the tools configuration, below. Default `./mcp.json`, which may be missing
 * `DATA_DIR` - default `./data`. Each thread has a directory in `sessions/`, named after its root post, with its
   session in `session.jsonl` and its images in `images/`
@@ -105,21 +106,24 @@ Pi generates images only through OpenRouter so far: `IMAGE_MODEL` is one of
 data retention, rules out.
 
 ### Recognizing images
-With `VISION_MODEL` set, the agent gets tools to work with the thread's images by name, whether `MODEL` takes images or
-not:
+With `VISION_MODEL` set, the agent gets tools to work with the thread's images by name:
 
-* `look_at_image` asks the vision model about images, such as what one shows, or the text in it
-* `locate` has it find things in an image, such as barcodes, a price tag or every face, as boxes
+* `look_at_image` asks the vision model about images, such as what one shows, or the text in it. Only when the
+  thread's model doesn't take images: one that does looks at them itself, rather than ask a likely weaker model
+* `locate` has it find things in an image, such as barcodes, a price tag or every face, as boxes. Models trained to find
+  things give far better boxes than most chat models, so the agent gets it whether its model takes images or not
 * `crop_image` cuts a box out of an image, at its full size, as an image of its own, `<name>-crop.png`, which the
-  agent can look closer at, or pass to any tool that takes images, such as an MCP server that reads barcodes
+  agent can look closer at, or pass to any tool that takes images, such as an MCP server that reads barcodes. It needs
+  no model, so a thread whose model takes images has it without `VISION_MODEL` too: pi scales images down to the
+  model's limits, and a crop is how it reads small text
 
 Boxes are `[ymin, xmin, ymax, xmax]`, from 0 to 1000 of the image's height and width. The vision model is asked for
 them by name, as models trained to find things answer arrays in their own order whatever they're asked: Qwen 3 VL
 puts x first. Gemini's `box_2d` and Qwen's `bbox_2d` arrays are read too, from 0 to 1000 or in pixels. Models differ
 a lot at this: Qwen 3 VL and Gemma 4 find things well, while Claude Haiku 5.5 and Mistral Medium 3.5 only roughly,
 so try `locate` with the one you pick. The vision model is sent images scaled down to its limits, while `crop_image`
-cuts from the image as it was posted or returned, and shows the crop to the agent only when `MODEL` takes images. These are tool calls, so only `allowedUsers` can have the agent
-make them.
+cuts from the image as it was posted or returned, and shows the crop to the agent only when its model takes images.
+These are tool calls, so only `allowedUsers` can have the agent make them.
 
 The vision model is asked for short, factual answers, of at most 2048 tokens: left alone, Qwen 3 VL writes thousands
 of words, and can repeat itself until it runs out of tokens, which takes it over 20 minutes. Vision models misread

@@ -4,7 +4,7 @@ import type { Api, AssistantMessage, Context, ImageContent, Model } from '@earen
 import type { ExtensionAPI, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import photon from '@silvia-odwyer/photon-node';
 import type { ImageFiles } from '../src/images.ts';
-import { crop, parseBoxes, vision } from '../src/vision.ts';
+import { crop, imageCrop, parseBoxes, vision } from '../src/vision.ts';
 
 /** A `width` by `height` PNG, red in its top left quarter and white elsewhere. */
 function png(width: number, height: number): ImageContent {
@@ -75,8 +75,8 @@ test('crops a box out of an image at its full size, with a margin', () => {
 const MODEL = { provider: 'openrouter', id: 'google/gemini-3.7-flash', input: ['text', 'image'] } as Model<Api>;
 
 /**
- * The vision tools, with a model that answers `answer`, a store that holds `stored` images, and an agent
- * that sees images unless `seesImages` is false.
+ * The vision tools and crop_image, with a model that answers `answer`, a store that holds `stored`
+ * images, and an agent that sees images unless `seesImages` is false.
  */
 function tools(answer: string, stored: Record<string, ImageContent> = {}, thinkingLevel: 'off' | 'low' = 'off', seesImages = true, stopReason = 'stop') {
   const requests: { context: Context; options: unknown }[] = [];
@@ -105,13 +105,14 @@ function tools(answer: string, stored: Record<string, ImageContent> = {}, thinki
   const registered = new Map<string, ToolDefinition>();
   const pi = { registerTool: (tool: ToolDefinition) => registered.set(tool.name, tool) };
   vision(models, MODEL, thinkingLevel, store, seesImages)(pi as unknown as ExtensionAPI);
+  imageCrop(store, seesImages)(pi as unknown as ExtensionAPI);
   const run = (name: string, params: object) => registered.get(name)!.execute('t1', params, undefined, undefined, {} as never);
   return { requests, saved, registered, run };
 }
 
-test('look_at_image asks the vision model about the images, each named', async () => {
+test('look_at_image asks the vision model about the images, each named, for an agent that can\'t see them', async () => {
   const garage = png(40, 20);
-  const { requests, run, registered } = tools('A red square.', { 'garage.png': garage }, 'low');
+  const { requests, run, registered } = tools('A red square.', { 'garage.png': garage }, 'low', false);
   const result = await run('look_at_image', { images: ['garage.png'], question: 'What is in it?' });
   assert.deepEqual(result.content, [{ type: 'text', text: 'A red square.' }]);
   assert.deepEqual(result.usage, { input: 1 });
@@ -126,8 +127,11 @@ test('look_at_image asks the vision model about the images, each named', async (
   assert.deepEqual(registered.get('look_at_image')!.prepareArguments!({ images: 'garage.png', question: 'q' }), { images: ['garage.png'], question: 'q' });
   await assert.rejects(run('look_at_image', { images: ['nope.png'], question: 'q' }), /no nope\.png/);
 
+  // An agent that sees images looks at them itself.
+  assert.deepEqual([...tools('').registered.keys()], ['locate', 'crop_image']);
+
   // An answer that ran out of tokens says so.
-  const cut = await tools('A red', { 'garage.png': garage }, 'off', true, 'length').run('look_at_image', { images: ['garage.png'], question: 'q' });
+  const cut = await tools('A red', { 'garage.png': garage }, 'off', false, 'length').run('look_at_image', { images: ['garage.png'], question: 'q' });
   assert.deepEqual(cut.content, [{ type: 'text', text: 'A red\n[google/gemini-3.7-flash was cut off here]' }]);
 });
 
