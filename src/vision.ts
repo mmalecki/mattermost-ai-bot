@@ -2,6 +2,7 @@ import { type Api, type ImageContent, type Model, type ThinkingLevel, Type } fro
 import { defineTool, type ExtensionFactory, type ModelRuntime, resizeImage } from '@earendil-works/pi-coding-agent';
 import photon from '@silvia-odwyer/photon-node';
 import type { ModelChoice } from './config.ts';
+import { textOf } from './content.ts';
 import type { ImageFiles } from './images.ts';
 
 /** The vision tools, which keep the images they make themselves. */
@@ -50,10 +51,7 @@ export function vision(
       { signal, maxTokens: MAX_TOKENS, ...(thinkingLevel !== 'off' ? { reasoning: thinkingLevel as ThinkingLevel } : {}) },
     );
     if (message.stopReason === 'error' || message.stopReason === 'aborted') throw new Error(message.errorMessage ?? `${model.id} ${message.stopReason}`);
-    let text = message.content
-      .flatMap((c) => (c.type === 'text' ? [c.text] : []))
-      .join('')
-      .trim();
+    let text = textOf(message.content).trim();
     if (message.stopReason === 'length') text += `\n[${model.id} was cut off here]`;
     return { text, sizes, usage: message.usage };
   };
