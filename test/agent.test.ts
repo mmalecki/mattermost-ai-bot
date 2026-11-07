@@ -44,9 +44,17 @@ test('tells the model how to give generate_image images only when it takes them'
   assert.doesNotMatch(buildSystemPrompt({ ...promptOptions, imageGeneration: true }), /pass it to generate_image/);
 });
 
-test('tells the model about the vision tools only when it has them', () => {
-  assert.match(buildSystemPrompt({ ...promptOptions, vision: true }), /ask look_at_image/);
-  assert.doesNotMatch(buildSystemPrompt(promptOptions), /look_at_image/);
+test('tells the model about the vision tools it has: look_at_image only when it is blind, crop_image when it sees images', () => {
+  const blind = buildSystemPrompt({ ...promptOptions, vision: true });
+  assert.match(blind, /ask look_at_image/);
+  assert.match(blind, /To work on a part of an image, .* find it with locate, and cut it out with crop_image, by the image's name: the new image can go to look_at_image/);
+
+  const seeing = buildSystemPrompt({ ...promptOptions, images: true, vision: true });
+  assert.doesNotMatch(seeing, /look_at_image/);
+  assert.match(seeing, /To look closer at a part of an image, .* find it with locate, and cut it out with crop_image, by the image's name\./);
+  assert.match(buildSystemPrompt({ ...promptOptions, images: true }), /To look closer at a part of an image, such as a barcode, a label or small text, cut it out with crop_image/);
+
+  assert.doesNotMatch(buildSystemPrompt(promptOptions), /look_at_image|locate|crop_image/);
 });
 
 test('tells the model which servers take images by name', () => {
@@ -185,5 +193,24 @@ test('VISION_MODEL gives sessions the vision tools, and must take images', async
   for (const tool of ['look_at_image', 'locate', 'crop_image']) assert.ok(llm.tools[0]!.includes(tool), tool);
   await session.close();
 
+  // A model that sees images looks at them itself.
+  const seeing = await agent.openSession('r2', { model: { provider: 'local', model: 'large', thinkingLevel: 'off' }, allowTools: () => true, imageStore });
+  await seeing.prompt('hi');
+  assert.deepEqual(['look_at_image', 'locate', 'crop_image'].map((tool) => llm.tools[1]!.includes(tool)), [false, true, true]);
+  await seeing.close();
+
   assert.equal((await localAgent()).agent.imageTools, false);
+});
+
+test('a model that sees images can crop them without VISION_MODEL', async (t) => {
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent } = await localAgent({ baseUrl: llm.url });
+  const imageStore = { ...agent.images('r1'), attach: () => {} };
+  for (const model of ['large', 'small']) {
+    const session = await agent.openSession(model, { model: { provider: 'local', model, thinkingLevel: 'off' }, allowTools: () => true, imageStore });
+    await session.prompt('hi');
+    await session.close();
+  }
+  assert.deepEqual(llm.tools.map((tools) => ['look_at_image', 'locate', 'crop_image'].filter((tool) => tools.includes(tool))), [['crop_image'], []]);
 });

@@ -20,7 +20,7 @@ import { errorMessage } from './error.ts';
 import { loadScheduler, type ScheduledJob, scheduler } from './scheduler.ts';
 import { type ImageFiles, imageFiles } from './images.ts';
 import { type ImageStore, imageGeneration, mcpImages, mcpNamespace, mcpServers, toolGuard, toolImages, withoutCwd } from './tools.ts';
-import { VISION_TOOLS, vision } from './vision.ts';
+import { imageCrop, VISION_TOOLS, vision } from './vision.ts';
 
 // Published as TypeScript, which Node won't strip under node_modules, so pi loads it like any
 // installed pi package.
@@ -207,7 +207,9 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           ...(schedulerExtension && onScheduled ? [scheduler(schedulerExtension, onScheduled)] : []),
           ...(imageModel && imageStore ? [imageGeneration(modelRuntime, imageModel, imageStore)] : []),
           ...(visionModel && imageStore ? [vision(modelRuntime, visionModel, config.visionModel!.thinkingLevel, imageStore, images)] : []),
-          ...(imageTools && imageStore ? [toolImages(imageStore, ['generate_image', ...VISION_TOOLS]), mcpImages(serverImages, imageStore)] : []),
+          // A model that sees images crops them to look closer, as pi scales them down.
+          ...((images || visionModel) && imageStore ? [imageCrop(imageStore, images)] : []),
+          ...((images || imageTools) && imageStore ? [toolImages(imageStore, ['generate_image', ...VISION_TOOLS]), mcpImages(serverImages, imageStore)] : []),
           withoutCwd(),
         ],
         noExtensions: true,
@@ -291,7 +293,7 @@ export interface SystemPromptOptions {
   imageEdits: boolean;
   /** The MCP servers that take images by name, with the arguments they take them in. */
   imageServers: Record<string, string[]>;
-  /** Whether the agent has the vision tools. */
+  /** Whether VISION_MODEL is set, which gives the agent locate, and look_at_image unless it sees images. */
   vision: boolean;
   /** Where people open the server, for links. */
   serverUrl: string;
@@ -328,9 +330,11 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
           'To change an image, or make one from it, pass its name to generate_image in images: one posted in the thread by the name on its [image] line, one you generated or a tool returned by the name it was saved as. Say what to change in the prompt.',
         ]
       : []),
-    ...(vision
+    ...(vision && !images ? ['To learn what is in images in this thread, ask look_at_image, by their names.'] : []),
+    // crop_image, which the agent has when it sees images, or has VISION_MODEL's tools.
+    ...(images || vision
       ? [
-          'To learn what is in images in this thread, ask look_at_image, by their names. To work on a part of one, such as a barcode, a label or small text, find it with locate, and cut it out with crop_image: the new image can go to look_at_image, or to any tool that takes images.',
+          `To ${images ? 'look closer at' : 'work on'} a part of an image, such as a barcode, a label or small text, ${vision ? 'find it with locate, and ' : ''}cut it out with crop_image, by the image's name${images ? '' : ': the new image can go to look_at_image, or to any tool that takes images'}.`,
         ]
       : []),
     ...(imageArguments.length

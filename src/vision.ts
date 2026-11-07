@@ -22,10 +22,10 @@ const SYSTEM_PROMPT =
 export type Box = [number, number, number, number];
 
 /**
- * `look_at_image`, `locate` and `crop_image`: the agent asks `model`, a chat model that takes images,
- * about the images in `store`, finds things in them as boxes, and cuts boxes out as images of their
- * own, which `store` keeps for other tools to take. So a model that doesn't take images can use them,
- * and one that does can look closer: crops are shown to the agent when it `seesImages`.
+ * `look_at_image` and `locate`: the agent asks `model`, a chat model that takes images, about the
+ * images in `store`, and has it find things in them as boxes, for crop_image. An agent that
+ * `seesImages` looks at them itself, so it only gets `locate`: models trained to find things give far
+ * better boxes than most chat models.
  */
 export function vision(
   models: Pick<ModelRuntime, 'completeSimple'>,
@@ -58,24 +58,26 @@ export function vision(
   const details = { model: `${model.provider}/${model.id}` };
 
   return (pi) => {
-    pi.registerTool(
-      defineTool({
-        name: 'look_at_image',
-        label: 'Look at Image',
-        description: `Asks ${model.id}, which sees images, a question about images in the thread, such as what one shows, or what text is in it. Ask for everything you need at once. It can misread small or blurry text, and say what a question suggests: ask open questions, not whether it's something you have in mind, and check text it reads on a crop of it.`,
-        promptSnippet: 'Ask a vision model about images in the thread',
-        parameters: Type.Object({
-          images: Type.Array(Type.String(), { description: 'Names of the images: posted ones, by the name on their [image] line, or ones you generated or a tool returned' }),
-          question: Type.String({ description: 'What to tell about the images, in detail' }),
+    if (!seesImages) {
+      pi.registerTool(
+        defineTool({
+          name: 'look_at_image',
+          label: 'Look at Image',
+          description: `Asks ${model.id}, which sees images, a question about images in the thread, such as what one shows, or what text is in it. Ask for everything you need at once. It can misread small or blurry text, and say what a question suggests: ask open questions, not whether it's something you have in mind, and check text it reads on a crop of it.`,
+          promptSnippet: 'Ask a vision model about images in the thread',
+          parameters: Type.Object({
+            images: Type.Array(Type.String(), { description: 'Names of the images: posted ones, by the name on their [image] line, or ones you generated or a tool returned' }),
+            question: Type.String({ description: 'What to tell about the images, in detail' }),
+          }),
+          // Small models often send a single image as a string. Validation follows.
+          prepareArguments: (args) => withList(args, 'images'),
+          async execute(_toolCallId, { images, question }, signal) {
+            const { text, usage } = await ask(question, images, signal);
+            return { content: [{ type: 'text', text: text || `${model.id} said nothing` }], details, usage };
+          },
         }),
-        // Small models often send a single image as a string. Validation follows.
-        prepareArguments: (args) => withList(args, 'images'),
-        async execute(_toolCallId, { images, question }, signal) {
-          const { text, usage } = await ask(question, images, signal);
-          return { content: [{ type: 'text', text: text || `${model.id} said nothing` }], details, usage };
-        },
-      }),
-    );
+      );
+    }
 
     pi.registerTool(
       defineTool({
@@ -97,17 +99,27 @@ export function vision(
         },
       }),
     );
+  };
+}
 
+/**
+ * `crop_image`: the agent cuts boxes out of the images in `store`, at their full size, as images of
+ * their own, which `store` keeps for other tools to take. pi scales images down to the model's
+ * limits, so this is how one that `seesImages` looks closer; crops are shown to it.
+ */
+export function imageCrop(store: ImageFiles, seesImages: boolean): ExtensionFactory {
+  return (pi) => {
     pi.registerTool(
       defineTool({
         name: 'crop_image',
         label: 'Crop Image',
-        description:
-          'Cuts a box out of an image in the thread, at its full size, and keeps it as an image of its own, which you can pass to tools that take images, to look closer or read it, such as a barcode or small text.',
+        description: `Cuts a box out of an image in the thread, at its full size, and keeps it as an image of its own, to look closer at it or read it, such as a barcode or small text. ${
+          seesImages ? "It's shown to you, and you can pass it to tools that take images." : 'You can pass it to look_at_image, or to any tool that takes images.'
+        }`,
         promptSnippet: 'Cut a box out of an image, as an image of its own',
         parameters: Type.Object({
           image: Type.String({ description: 'Name of the image' }),
-          box: Type.Array(Type.Number(), { minItems: 4, maxItems: 4, description: '[ymin, xmin, ymax, xmax], from 0 to 1000 of the image\'s height and width, as locate gives it' }),
+          box: Type.Array(Type.Number(), { minItems: 4, maxItems: 4, description: '[ymin, xmin, ymax, xmax], from 0 to 1000 of the image\'s height and width: as locate gives it, or as you judge it' }),
           margin: Type.Optional(Type.Number({ description: 'Added around the box, from 0 to 1000 of the image\'s height and width. Default 0' })),
         }),
         // Small models often send the box as JSON text. Validation follows.
