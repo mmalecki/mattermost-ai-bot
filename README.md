@@ -121,6 +121,11 @@ so try `locate` with the one you pick. The vision model is sent images scaled do
 cuts from the image as it was posted or returned, and shows the crop to the agent only when `MODEL` takes images. These are tool calls, so only `allowedUsers` can have the agent
 make them.
 
+The vision model is asked for short, factual answers, of at most 2048 tokens: left alone, Qwen 3 VL writes thousands
+of words, and can repeat itself until it runs out of tokens, which takes it over 20 minutes. Vision models misread
+small text, and agree with what a question suggests, so the agent is told to ask open questions, and to check the
+text read on a crop.
+
 ### Tools
 `mcp.json` uses [Pi's MCP configuration format](https://pi.dev/docs/latest/mcp), with one addition: `allowedUsers`, the
 Mattermost users who may have the agent call tools. It covers every tool call, the built-in web tools included, and

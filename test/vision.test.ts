@@ -78,12 +78,12 @@ const MODEL = { provider: 'openrouter', id: 'google/gemini-3.7-flash', input: ['
  * The vision tools, with a model that answers `answer`, a store that holds `stored` images, and an agent
  * that sees images unless `seesImages` is false.
  */
-function tools(answer: string, stored: Record<string, ImageContent> = {}, thinkingLevel: 'off' | 'low' = 'off', seesImages = true) {
+function tools(answer: string, stored: Record<string, ImageContent> = {}, thinkingLevel: 'off' | 'low' = 'off', seesImages = true, stopReason = 'stop') {
   const requests: { context: Context; options: unknown }[] = [];
   const models = {
     async completeSimple(_model: unknown, context: Context, options: unknown) {
       requests.push({ context, options });
-      return { role: 'assistant', content: [{ type: 'text', text: answer }], stopReason: 'stop', usage: { input: 1 } } as unknown as AssistantMessage;
+      return { role: 'assistant', content: [{ type: 'text', text: answer }], stopReason, usage: { input: 1 } } as unknown as AssistantMessage;
     },
   };
   const saved: { name: string; image: ImageContent }[] = [];
@@ -116,7 +116,8 @@ test('look_at_image asks the vision model about the images, each named', async (
   assert.deepEqual(result.content, [{ type: 'text', text: 'A red square.' }]);
   assert.deepEqual(result.usage, { input: 1 });
   const [request] = requests;
-  assert.deepEqual((request!.options as { reasoning: string }).reasoning, 'low');
+  assert.deepEqual(request!.options, { signal: undefined, maxTokens: 2048, reasoning: 'low' });
+  assert.match(request!.context.systemPrompt!, /^Answer briefly and factually/);
   const content = request!.context.messages[0]!.content as { type: string; text?: string }[];
   assert.deepEqual(
     content.map((c) => c.text ?? c.type),
@@ -124,6 +125,10 @@ test('look_at_image asks the vision model about the images, each named', async (
   );
   assert.deepEqual(registered.get('look_at_image')!.prepareArguments!({ images: 'garage.png', question: 'q' }), { images: ['garage.png'], question: 'q' });
   await assert.rejects(run('look_at_image', { images: ['nope.png'], question: 'q' }), /no nope\.png/);
+
+  // An answer that ran out of tokens says so.
+  const cut = await tools('A red', { 'garage.png': garage }, 'off', true, 'length').run('look_at_image', { images: ['garage.png'], question: 'q' });
+  assert.deepEqual(cut.content, [{ type: 'text', text: 'A red\n[google/gemini-3.7-flash was cut off here]' }]);
 });
 
 test('locate gives the boxes the vision model finds', async () => {
@@ -132,7 +137,7 @@ test('locate gives the boxes the vision model finds', async () => {
   assert.deepEqual(result.content, [{ type: 'text', text: 'Found in can.jpg, as [ymin, xmin, ymax, xmax] from 0 to 1000:\n[{"label":"barcode","box":[10,20,30,40]}]' }]);
   assert.match((found.requests[0]!.context.messages[0]!.content as { text: string }[])[0]!.text, /^Find barcodes in the image\. Answer only with a JSON array, .*"ymin": <top>/);
   // Without thinking, none is asked for.
-  assert.deepEqual(found.requests[0]!.options, { signal: undefined });
+  assert.deepEqual(found.requests[0]!.options, { signal: undefined, maxTokens: 2048 });
 
   const none = await tools('[]', { 'can.jpg': png(40, 20) }).run('locate', { image: 'can.jpg', what: 'barcodes' });
   assert.deepEqual(none.content, [{ type: 'text', text: 'google/gemini-3.7-flash found none in can.jpg.' }]);
