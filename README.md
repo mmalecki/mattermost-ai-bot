@@ -81,9 +81,10 @@ images attached to posts, scaled down to the model's limits. Up to 8 go with eac
 names of other files, and of images when the model doesn't take them.
 
 Images are kept in the thread's session file, and sent with every later run in the thread until it's compacted.
-When some tool takes images, such as `generate_image` below, posts' images are kept in the thread's `images/` too, the
-originals or Mattermost's preview, under the names they're posted with, made new to the thread, as `image-2.png` for
-a second `image.png`. The agent is given the names, seeing the images or not, and passes them to the tools.
+When the model or some tool takes images, such as `generate_image` below, posts' images are kept in the thread's
+`images/` too, the originals or Mattermost's preview, under the names they're posted with, made new to the thread,
+as `image-2.png` for a second `image.png`. The agent is given the names, seeing the images or not, and passes them to
+the tools. Nothing removes them, or the thread's session, so `sessions/` grows with every thread.
 
 ### Generating images
 With `IMAGE_MODEL` set, the agent gets a `generate_image` tool, and every image it generates in a run is attached to
@@ -188,8 +189,8 @@ another addition: the server's `images`, saying how its tools take an image:
 }
 ```
 
-Every string in a call to one of its tools that names an image in the thread, such as `"base64": "garage.png"`, is
-replaced with the image, before the call reaches the server, and only there: the session keeps the name. Images
+Every string in a call to one of its tools that names an image in the thread, such as `"base64": "garage.png"`, for
+whichever argument the tool takes the image in, is replaced with the image, before the call reaches the server, and only there: the session keeps the name. Images
 are passed on whole, up to 20 MB for a posted one, which `base64` and `dataUrl` grow by a third, so a server may
 refuse large ones.
 
