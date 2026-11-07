@@ -161,6 +161,7 @@ class Thread {
   #pending = false;
   /** Scheduled jobs that came due, run after any new posts. */
   readonly #jobs: ScheduledJob[] = [];
+  /** The thread's images: posted ones, and those tools made and returned. */
   readonly #images: ThreadImages;
   /** Whether the current run may call tools. */
   #allowed = false;
@@ -174,7 +175,7 @@ class Thread {
     this.#firstPostId = firstPostId;
     this.#previous = previous;
     this.#retire = retire;
-    this.#images = new ThreadImages(context.chat, rootId, () => this.#session!);
+    this.#images = new ThreadImages(context.agent.images(rootId));
   }
 
   wake(): void {
@@ -297,7 +298,8 @@ class Thread {
 
   /**
    * The posts' files: lines naming each, and the images the model can see, in the order of their
-   * lines, if it takes `images`. A file that can't be handed over is only named, so answering doesn't
+   * lines, if it takes `images`. Images are kept in the thread when the model or some tool takes them,
+   * and named as they're kept. A file that can't be handed over is only named, so answering doesn't
    * fail on it.
    */
   async #attachments(posts: ThreadPost[], takesImages: boolean): Promise<{ lines: string[][]; images: ImageContent[] }> {
@@ -308,9 +310,7 @@ class Thread {
       const postLines: string[] = [];
       for (const file of post.files) {
         const image = file.mimeType.startsWith('image/');
-        if (image && takesImages) postLines.push(await this.#image(file, images));
-        // The model can't see it, but can still have it changed.
-        else if (image && agent.imageEdits) postLines.push(`[image: ${file.name}, file ${file.id}, which you can't see]`);
+        if (image && (takesImages || agent.imageTools)) postLines.push(await this.#image(file, images, takesImages));
         else postLines.push(fileLine(file));
       }
       lines.push(postLines);
@@ -319,22 +319,26 @@ class Thread {
   }
 
   /**
-   * Adds the image to `images`, and returns its line. When generate_image takes images, the line gives
-   * its file id, for the model to pass it on.
+   * Keeps the image in the thread, and returns its line, with the name it's kept under. When the model
+   * `takesImages`, adds it to `images` too.
    */
-  async #image(file: PostFile, images: ImageContent[]): Promise<string> {
-    const { agent, chat } = this.#context;
-    const name = agent.imageEdits ? `${file.name}, file ${file.id}` : file.name;
-    if (images.length >= MAX_IMAGES) return `[image: ${name}, not shown: too many images at once]`;
+  async #image(file: PostFile, images: ImageContent[], takesImages: boolean): Promise<string> {
     const source = imageSource(file);
-    if (!source) return `[image: ${name}, not shown: too large, or in a format you can't see]`;
+    if (!source) return `[image: ${file.name}, not shown: too large, or in a format you can't see]`;
+    let image: ImageContent;
+    let name: string;
     try {
-      images.push(await download(chat, file.id, source));
-      return `[image ${images.length}: ${name}]`;
+      image = await download(this.#context.chat, file.id, source);
+      name = await this.#images.save(file.name, image);
     } catch (error) {
       console.warn(`Thread ${this.#rootId}: image ${file.id} couldn't be downloaded:`, errorMessage(error));
-      return `[image: ${name}, not shown: it couldn't be downloaded]`;
+      return `[image: ${file.name}, not shown: it couldn't be downloaded]`;
     }
+    // The model can't see it, but tools can still take it.
+    if (!takesImages) return `[image: ${name}, which you can't see]`;
+    if (images.length >= MAX_IMAGES) return `[image: ${name}, not shown: too many images at once]`;
+    images.push(image);
+    return `[image ${images.length}: ${name}]`;
   }
 
   async #runJob(session: ThreadSession, job: ScheduledJob): Promise<void> {
@@ -367,12 +371,11 @@ class Thread {
     this.#images.startRun();
     await session.prompt(prompt, images);
     const reply = replyText(session, startedAt);
-    const files = this.#images.takeGenerated();
+    const files = await this.#images.takeAttached();
     // pi drops an answer cut off at the output limit to compact and retry, and the retry may not happen.
     if (reply === NO_ANSWER) console.warn(`Thread ${this.#rootId}: the run added no answer`);
     if (reply || files.length) {
-      const fileIds = await this.#context.chat.reply(this.#channelId, this.#rootId, reply ?? '', files);
-      this.#images.posted(files, fileIds);
+      await this.#context.chat.reply(this.#channelId, this.#rootId, reply ?? '', files);
     }
     console.log(`Thread ${this.#rootId}: replied (${reply?.length ?? 0} chars${files.length ? `, ${files.length} image(s)` : ''})`);
   }

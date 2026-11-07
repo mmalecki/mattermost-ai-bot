@@ -40,7 +40,7 @@ test('tells the model its generated images are attached only when it can generat
 });
 
 test('tells the model how to give generate_image images only when it takes them', () => {
-  assert.match(buildSystemPrompt({ ...promptOptions, imageGeneration: true, imageEdits: true }), /pass it to generate_image in images/);
+  assert.match(buildSystemPrompt({ ...promptOptions, imageGeneration: true, imageEdits: true }), /pass its name to generate_image in images/);
   assert.doesNotMatch(buildSystemPrompt({ ...promptOptions, imageGeneration: true }), /pass it to generate_image/);
 });
 

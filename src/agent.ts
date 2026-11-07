@@ -18,20 +18,20 @@ import {
 import { type Config, type ModelChoice, parseModel } from './config.ts';
 import { errorMessage } from './error.ts';
 import { loadScheduler, type ScheduledJob, scheduler } from './scheduler.ts';
-import { type ImageStore, imageGeneration, mcpServers, toolGuard, withoutCwd } from './tools.ts';
+import { type ImageFiles, imageFiles } from './images.ts';
+import { type ImageStore, imageGeneration, mcpServers, toolGuard, toolImages, withoutCwd } from './tools.ts';
 
 // Published as TypeScript, which Node won't strip under node_modules, so pi loads it like any
 // installed pi package.
 const FEATHER_PI_WEB = dirname(fileURLToPath(import.meta.resolve('@mmalecki/feather-pi-web/package.json')));
 
 export interface Agent {
-  /**
-   * Whether generate_image can change images it is given. If so, the model needs the file ids of the
-   * images posted in a thread, to pass them on.
-   */
-  readonly imageEdits: boolean;
+  /** Whether some tool takes images, such as generate_image to change them, so posts' images are kept for it. */
+  readonly imageTools: boolean;
   /** Whether the thread has a session from an earlier run. */
   hasSession(rootId: string): boolean;
+  /** The thread's images, kept in its directory. */
+  images(rootId: string): ImageFiles;
   /**
    * Parses `ref`, written `provider/model[:thinking]`, as a model to run a thread on. Returns
    * undefined when pi knows no such provider, so `ref` is ordinary text rather than a model. Throws
@@ -42,8 +42,8 @@ export interface Agent {
    * Opens the thread's session, creating it on first use. A new session runs on `model`, MODEL's by
    * default; an existing one on the model it was created with. With the scheduler on, `onScheduled`
    * gets the thread's scheduled jobs as they come due; without it, the session can't schedule any.
-   * Likewise, with IMAGE_MODEL set, `imageStore` keeps the images the agent generates, and finds those
-   * it is given.
+   * With some tool taking images, or IMAGE_MODEL set, `imageStore` keeps the images tools make and
+   * return, and finds those they're given.
    */
   openSession(
     rootId: string,
@@ -138,7 +138,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
   const schedulerExtension = config.scheduler ? await loadScheduler() : undefined;
   if (schedulerExtension) console.log('Scheduler: on');
 
-  /** A thread's directory, which holds its session. */
+  /** A thread's directory, which holds its session and its images. */
   const threadDir = (rootId: string) => join(sessionDir, rootId);
   const sessionFile = (rootId: string) => join(threadDir(rootId), 'session.jsonl');
   // Threads with a session file, kept here rather than looked up on every post. pi writes the file
@@ -156,10 +156,12 @@ export async function createAgent(config: Config, botUsername: string): Promise<
   }
 
   const imageEdits = !!imageModel?.input.includes('image');
+  const imageTools = imageEdits;
 
   return {
-    imageEdits,
+    imageTools,
     hasSession: (rootId) => sessions.has(rootId),
+    images: (rootId) => imageFiles(join(threadDir(rootId), 'images')),
 
     pickModel(ref) {
       let choice;
@@ -196,6 +198,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           toolGuard(allowTools),
           ...(schedulerExtension && onScheduled ? [scheduler(schedulerExtension, onScheduled)] : []),
           ...(imageModel && imageStore ? [imageGeneration(modelRuntime, imageModel, imageStore)] : []),
+          ...(imageTools && imageStore ? [toolImages(imageStore, ['generate_image'])] : []),
           withoutCwd(),
         ],
         noExtensions: true,
@@ -306,7 +309,7 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
       : []),
     ...(imageGeneration && imageEdits
       ? [
-          'To change an image, or make one from it, pass it to generate_image in images: one posted in the thread by the "file <id>" on its line, one you generated or a tool returned by its name. Say what to change in the prompt.',
+          'To change an image, or make one from it, pass its name to generate_image in images: one posted in the thread by the name on its [image] line, one you generated or a tool returned by the name it was saved as. Say what to change in the prompt.',
         ]
       : []),
     ...directServers(servers),

@@ -2,6 +2,7 @@ import { type ImageApi, type ImageContent, type ImageModel, Type } from '@earend
 import { defineTool, type ExtensionFactory, type McpServerConfig, type ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { textOf } from './content.ts';
 import { errorMessage } from './error.ts';
+import type { ImageFiles } from './images.ts';
 
 const BLOCKED = 'Tools are off in this thread: someone who has posted in it is not allowed to use them.';
 
@@ -46,27 +47,16 @@ export function toolGuard(allowed: (toolName: string) => boolean): ExtensionFact
   };
 }
 
-/** Where generate_image keeps the images it makes, and finds the ones it is given. */
-export interface ImageStore {
-  /** Keeps a generated image, as the image model returned it, to be posted with the reply. Returns its name. */
-  add(image: ImageContent): string;
-  /**
-   * Names an image another tool returned, the `index`th image of call `toolCallId`'s result, which is
-   * found in the session when it is given. Returns its name.
-   */
-  addFetched(toolCallId: string, index: number, mimeType: string): string;
-  /**
-   * The images `refs` name, in order: ones posted in the thread by their file id, and generated and
-   * fetched ones by name. Throws for a reference to anything else, naming it.
-   */
-  get(refs: string[]): Promise<ImageContent[]>;
+/** The thread's images, for the tools that make and take them. */
+export interface ImageStore extends ImageFiles {
+  /** Attaches the image `name` names, one kept in the thread, to the reply. */
+  attach(name: string): void;
 }
 
 /**
- * `generate_image`, with `model`. Each image goes to `store` as the model returned it, for the bot to
- * post, and to the agent too, which pi scales down and re-encodes like any tool result's images. When the
- * model takes images, the tool takes images to change or draw from, which `store` finds, and the images
- * other tools return are named in their results so they can be given too.
+ * `generate_image`, with `model`. Each image is kept in `store` and attached to the reply, and goes to
+ * the agent too, which pi scales down and re-encodes like any tool result's images. When the model takes
+ * images, the tool takes images to change or draw from, by their names in `store`.
  */
 export function imageGeneration(models: Pick<ModelRuntime, 'generateImages'>, model: ImageModel<ImageApi>, store: ImageStore): ExtensionFactory {
   const edits = model.input.includes('image');
@@ -83,7 +73,7 @@ export function imageGeneration(models: Pick<ModelRuntime, 'generateImages'>, mo
             ? {
                 images: Type.Optional(
                   Type.Array(Type.String(), {
-                    description: 'Images to change or draw from: ones posted in the thread by their file id, ones you generated or a tool returned by their name',
+                    description: "Names of images to change or draw from: ones posted in the thread, by the name on their [image] line, or ones you generated or a tool returned",
                   }),
                 ),
               }
@@ -97,35 +87,46 @@ export function imageGeneration(models: Pick<ModelRuntime, 'generateImages'>, mo
         },
 
         async execute(_toolCallId, params, signal) {
-          const { prompt, images: refs = [] } = params as { prompt: string; images?: string[] };
+          const { prompt, images: names = [] } = params as { prompt: string; images?: string[] };
           // A model that doesn't take images never gets the parameter, but may send it anyway.
-          const given = edits ? await store.get(refs) : [];
+          const given = edits ? await store.get(names) : [];
           const result = await models.generateImages(model, { input: [{ type: 'text', text: prompt }, ...given] }, { signal });
           if (result.stopReason !== 'stop') throw new Error(result.errorMessage ?? `Image generation ${result.stopReason}`);
           const text = textOf(result.output, '\n').trim();
           const images = result.output.filter((c): c is ImageContent => c.type === 'image');
           if (!images.length) throw new Error(`${model.id} returned no image${text ? `: ${text}` : ''}`);
-          // Copies, as pi re-encodes the result's images.
-          const names = images.map((image) => store.add({ ...image }));
+          const kept: string[] = [];
+          for (const image of images) kept.push(await store.save('image', image));
+          kept.forEach((name) => store.attach(name));
           return {
-            content: [{ type: 'text', text: `Generated ${names.join(', ')}, attached to your reply.${text ? `\n${model.id} said: ${text}` : ''}` }, ...images],
-            details: { model: `${model.provider}/${model.id}`, names },
+            content: [{ type: 'text', text: `Generated ${kept.join(', ')}, attached to your reply.${text ? `\n${model.id} said: ${text}` : ''}` }, ...images],
+            details: { model: `${model.provider}/${model.id}`, names: kept },
             ...(result.usage ? { usage: result.usage } : {}),
           };
         },
       }),
     );
-    if (!edits) return;
+  };
+}
 
-    // Images from webfetch, MCP servers and the like. Not those of nested calls, such as a codemode
-    // script's, whose results go to the script rather than the model.
-    pi.on('tool_result', (event) => {
-      if (event.toolName === 'generate_image' || event.parentToolCallId) return undefined;
-      const names = event.content.flatMap((c) => (c.type === 'image' ? [c] : [])).map((image, i) => store.addFetched(event.toolCallId, i, image.mimeType));
-      if (!names.length) return undefined;
+/**
+ * Keeps the images other tools return, such as webfetch's or an MCP server's, in `store`, as they
+ * returned them, and names them in their results, so they can be passed to tools that take images.
+ * Not `ownTools`', which keep their images themselves, nor those of nested calls, such as a codemode
+ * script's, whose results go to the script rather than the model.
+ */
+export function toolImages(store: ImageFiles, ownTools: string[]): ExtensionFactory {
+  return (pi) => {
+    pi.on('tool_result', async (event) => {
+      if (ownTools.includes(event.toolName) || event.parentToolCallId) return undefined;
+      const images = event.content.filter((c): c is ImageContent => c.type === 'image');
+      if (!images.length) return undefined;
+      const names: string[] = [];
+      // In order, so they're numbered as they come. Copies, as pi re-encodes the result's images.
+      for (const image of images) names.push(await store.save('fetched', { ...image }));
       // A result replaces the whole of the tool's, so the rest is carried over.
       return {
-        content: [...event.content, { type: 'text', text: `Saved as ${names.join(', ')}, which you can pass to generate_image.` }],
+        content: [...event.content, { type: 'text', text: `Saved as ${names.join(', ')}, which you can pass to tools that take images.` }],
         details: event.details,
         structuredContent: event.structuredContent,
         usage: event.usage,

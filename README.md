@@ -23,7 +23,8 @@ Set in `.env`:
 * `IMAGE_MODEL` - enables `generate_image`, with this model, as `provider/model` like `MODEL` but without thinking,
   for example `openrouter/bytedance-seed/seedream-5-0-pro`. See below
 * `MCP_CONFIG` - path to the tools configuration, below. Default `./mcp.json`, which may be missing
-* `DATA_DIR` - default `./data`
+* `DATA_DIR` - default `./data`. Each thread has a directory in `sessions/`, named after its root post, with its
+  session in `session.jsonl` and its images in `images/`
 * `SCHEDULER` - `true` lets the agent schedule jobs in a thread, once or repeatedly, with
   [pi-ate-scheduler](https://github.com/catlain/pi-scheduler). Default `false`. See below
 * `CODEMODE` - `true` gives the agent [Pi's `codemode`](https://pi.dev/docs/latest/codemode) tool even when every MCP
@@ -78,19 +79,22 @@ images attached to posts, scaled down to the model's limits. Up to 8 go with eac
 names of other files, and of images when the model doesn't take them.
 
 Images are kept in the thread's session file, and sent with every later run in the thread until it's compacted.
+When some tool takes images, such as `generate_image` below, posts' images are kept in the thread's `images/` too, the
+originals or Mattermost's preview, under the names they're posted with, made new to the thread, as `image-2.png` for
+a second `image.png`. The agent is given the names, seeing the images or not, and passes them to the tools.
 
 ### Generating images
 With `IMAGE_MODEL` set, the agent gets a `generate_image` tool, and every image it generates in a run is attached to
-its reply, up to 10 to a post. It sees them too when the model takes images, scaled down to the model's limits and kept in
-the session file like posted images. Generating is a tool call, so only `allowedUsers` can have the agent make images.
+its reply, up to 10 to a post, and kept in the thread's `images/` as `image.png`, `image-2.png` and so on. It sees them
+too when the model takes images, scaled down to the model's limits and kept in the session file like posted images.
+Generating is a tool call, so only `allowedUsers` can have the agent make images.
 
 When the image model takes images too, as most do (`"input": ["text", "image"]` in Pi's catalog), the agent can have
-images changed, or new ones made from them: those posted in the thread, which it's given the file ids of, and those
-it generated, by name. It gets the originals, or Mattermost's preview of an image too large or in another format, and
-only from the thread's posts, so a post can't have it reach files elsewhere. Images other tools return in the thread,
-such as `webfetch` or an MCP server, are named in their results so the agent can pass them on too, as Pi keeps them:
-scaled down to the chat model's limits. Some image models take only one image at a time, such as
-`microsoft/mai-image-2.6`, which can't combine images then.
+images changed, or new ones made from them, by their names in the thread's `images/`, and only those, so a post can't
+have it reach files elsewhere: those posted in the thread, those it generated, and those other tools return, such as
+`webfetch` or an MCP server, which are kept as the tools return them, as `fetched.png` and so on, and named in their
+results. Some image models take only one image at a time, such as `microsoft/mai-image-2.6`, which can't combine
+images then.
 
 Pi generates images only through OpenRouter so far: `IMAGE_MODEL` is one of
 [its image models](https://openrouter.ai/models?output_modalities=image), and needs `OPENROUTER_API_KEY` whatever
