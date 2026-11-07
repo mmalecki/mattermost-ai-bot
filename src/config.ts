@@ -19,6 +19,8 @@ export interface Config {
   };
   /** The model the agent generates images with, from pi's catalog or `modelsPath`. Unset: no images. */
   imageModel: { provider: string; model: string } | undefined;
+  /** The chat model the agent's vision tools look at images with, which must take them. Unset: no vision tools. */
+  visionModel: ModelChoice | undefined;
   tools: ToolsConfig;
   /** Whether the agent can schedule jobs in its threads, with pi-ate-scheduler. */
   scheduler: boolean;
@@ -83,6 +85,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       modelsPath: join(dirname(mcpConfig), 'models.json'),
     },
     imageModel: env.IMAGE_MODEL?.trim() ? parseImageModel(env.IMAGE_MODEL.trim()) : undefined,
+    visionModel: env.VISION_MODEL?.trim() ? parseVisionModel(env.VISION_MODEL.trim()) : undefined,
     // A missing default file means no MCP servers; a missing file that was asked for is an error.
     tools: loadTools(mcpConfig, !!env.MCP_CONFIG),
     scheduler: flag('SCHEDULER'),
@@ -123,6 +126,15 @@ export function parseImageModel(ref: string): NonNullable<Config['imageModel']> 
   }
   if (parsed.thinkingLevel !== 'off') throw new Error(`IMAGE_MODEL takes no thinking level, as in "${ref}"`);
   return { provider: parsed.provider, model: parsed.model };
+}
+
+/** `provider/model[:thinking]`, as MODEL takes it. */
+export function parseVisionModel(ref: string): ModelChoice {
+  try {
+    return parseModel(ref);
+  } catch {
+    throw new Error(`VISION_MODEL must be provider/model[:thinking], such as openrouter/google/gemini-3-flash, not "${ref}"`);
+  }
 }
 
 /**

@@ -20,6 +20,7 @@ import { errorMessage } from './error.ts';
 import { loadScheduler, type ScheduledJob, scheduler } from './scheduler.ts';
 import { type ImageFiles, imageFiles } from './images.ts';
 import { type ImageStore, imageGeneration, mcpImages, mcpNamespace, mcpServers, toolGuard, toolImages, withoutCwd } from './tools.ts';
+import { VISION_TOOLS, vision } from './vision.ts';
 
 // Published as TypeScript, which Node won't strip under node_modules, so pi loads it like any
 // installed pi package.
@@ -135,6 +136,12 @@ export async function createAgent(config: Config, botUsername: string): Promise<
     console.log(`Image model: ${provider}/${id}${imageModel.input.includes('image') ? ', edits images' : ''}`);
   }
 
+  const visionModel = config.visionModel && findModel('VISION_MODEL', config.visionModel.provider, config.visionModel.model);
+  if (visionModel) {
+    if (!visionModel.input.includes('image')) throw new Error(`VISION_MODEL ${visionModel.provider}/${visionModel.id} doesn't take images`);
+    console.log(`Vision model: ${visionModel.provider}/${visionModel.id} (thinking ${config.visionModel!.thinkingLevel})`);
+  }
+
   const schedulerExtension = config.scheduler ? await loadScheduler() : undefined;
   if (schedulerExtension) console.log('Scheduler: on');
 
@@ -157,7 +164,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
 
   const imageEdits = !!imageModel?.input.includes('image');
   const { serverImages } = config.tools;
-  const imageTools = imageEdits || Object.keys(serverImages).length > 0;
+  const imageTools = imageEdits || !!visionModel || Object.keys(serverImages).length > 0;
 
   return {
     imageTools,
@@ -199,7 +206,8 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           toolGuard(allowTools),
           ...(schedulerExtension && onScheduled ? [scheduler(schedulerExtension, onScheduled)] : []),
           ...(imageModel && imageStore ? [imageGeneration(modelRuntime, imageModel, imageStore)] : []),
-          ...(imageTools && imageStore ? [toolImages(imageStore, ['generate_image']), mcpImages(serverImages, imageStore)] : []),
+          ...(visionModel && imageStore ? [vision(modelRuntime, visionModel, config.visionModel!.thinkingLevel, imageStore)] : []),
+          ...(imageTools && imageStore ? [toolImages(imageStore, ['generate_image', ...VISION_TOOLS]), mcpImages(serverImages, imageStore)] : []),
           withoutCwd(),
         ],
         noExtensions: true,
@@ -215,6 +223,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           imageGeneration: !!imageModel,
           imageEdits,
           imageServers: Object.keys(serverImages),
+          vision: !!visionModel,
           serverUrl: config.mattermost.publicUrl,
           rootId,
         }),
@@ -282,6 +291,8 @@ export interface SystemPromptOptions {
   imageEdits: boolean;
   /** The MCP servers that take images by name. */
   imageServers: string[];
+  /** Whether the agent has the vision tools. */
+  vision: boolean;
   /** Where people open the server, for links. */
   serverUrl: string;
   /** The thread's root post, so its link can be given. */
@@ -289,7 +300,7 @@ export interface SystemPromptOptions {
 }
 
 export function buildSystemPrompt(options: SystemPromptOptions): string {
-  const { botUsername, servers, scheduler, images, imageGeneration, imageEdits, imageServers, serverUrl, rootId } = options;
+  const { botUsername, servers, scheduler, images, imageGeneration, imageEdits, imageServers, vision, serverUrl, rootId } = options;
   return [
     `You are @${botUsername}, a Mattermost bot that gets things done with your tools.`,
     'Each user message holds one or more Mattermost posts from a thread, as "@username (time, post <id>): text". Several people can take part in one thread.',
@@ -314,6 +325,11 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
     ...(imageGeneration && imageEdits
       ? [
           'To change an image, or make one from it, pass its name to generate_image in images: one posted in the thread by the name on its [image] line, one you generated or a tool returned by the name it was saved as. Say what to change in the prompt.',
+        ]
+      : []),
+    ...(vision
+      ? [
+          'To learn what is in images in this thread, ask look_at_image, by their names. To work on a part of one, such as a barcode, a label or small text, find it with locate, and cut it out with crop_image: the new image can go to look_at_image, or to any tool that takes images.',
         ]
       : []),
     ...(imageServers.length
