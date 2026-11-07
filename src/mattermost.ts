@@ -13,35 +13,55 @@ const CATCH_UP_MARGIN_MS = 60_000;
 /** Older posts aren't caught up on: after a long outage, they're old news. */
 const CATCH_UP_MAX_MS = 24 * 3_600_000;
 
+/** What the bot uses of Mattermost's REST client. */
+export type Client = Pick<
+  Client4,
+  'getMe' | 'getMyTeams' | 'getMyChannels' | 'getPostsSince' | 'getPaginatedPostThread' | 'getUser' | 'getFileRoute' | 'uploadFile' | 'createPost'
+>;
+
+/** What the bot uses of Mattermost's WebSocket client. */
+export type Socket = Pick<
+  WebSocketClient,
+  'addMessageListener' | 'addMissedMessageListener' | 'addFirstConnectListener' | 'addReconnectListener' | 'addCloseListener' | 'initialize' | 'close' | 'userTyping'
+>;
+
 export class Mattermost implements Chat {
-  readonly #client = new Client4();
-  readonly #ws = new WebSocketClient();
+  readonly botUserId: string;
+  readonly botUsername: string;
+  readonly #client: Client;
+  readonly #ws: Socket;
   readonly #usernames = new Map<string, Promise<string>>();
   readonly #url: string;
   readonly #token: string;
-  /** Set by login(). */
-  botUserId = '';
-  /** Set by login(). */
-  botUsername = '';
-  #loggedInAt = 0;
+  readonly #loggedInAt = Date.now();
 
-  constructor(url: string, token: string) {
-    this.#url = url;
-    this.#token = token;
-    this.#client.setUrl(url);
-    this.#client.setToken(token);
+  /**
+   * Logs in to the server at `url` as the bot `token` belongs to. `client` and `ws` stand in for
+   * Mattermost's own clients, which are set up for `url` and `token` otherwise.
+   */
+  static async connect(url: string, token: string, { client, ws }: { client?: Client; ws?: Socket } = {}): Promise<Mattermost> {
+    if (!client) {
+      const client4 = new Client4();
+      client4.setUrl(url);
+      client4.setToken(token);
+      client = client4;
+    }
+    const me = await client.getMe();
+    console.log(`Logged in to ${url} as @${me.username}`);
+    return new Mattermost(url, token, client, ws ?? new WebSocketClient(), me);
   }
 
-  async login(): Promise<void> {
-    const me = await this.#client.getMe();
+  private constructor(url: string, token: string, client: Client, ws: Socket, me: { id: string; username: string }) {
+    this.#url = url;
+    this.#token = token;
+    this.#client = client;
+    this.#ws = ws;
     this.botUserId = me.id;
     this.botUsername = me.username;
-    this.#loggedInAt = Date.now();
-    console.log(`Logged in to ${this.#url} as @${me.username}`);
   }
 
   /**
-   * Starts delivering new posts to `onPost`, from those made since login(). Posts made while the
+   * Starts delivering new posts to `onPost`, from those made since logging in. Posts made while the
    * connection was down are delivered once it is back, up to a day's worth. Posts may come more than once.
    */
   listen(onPost: (post: IncomingPost) => void): void {
@@ -62,7 +82,7 @@ export class Mattermost implements Chat {
       this.#usernames.clear();
       this.#catchUp(lastEventAt, onPost);
     });
-    // Once the first connection is up, posts made since login(), while the agent was created. It's a
+    // Once the first connection is up, posts made since logging in, while the agent was created. It's a
     // reconnect if connecting failed before.
     let connected = false;
     const opened = (how: string) => {
@@ -261,7 +281,8 @@ export function splitMessage(message: string, max: number): string[] {
  * surrogate pair.
  */
 function cut(text: string, limit: number, hard = false): { part: string; next: string } {
-  const window = text.slice(0, limit);
+  // One past the limit: a break right after it still fits, as the break itself goes.
+  const window = text.slice(0, limit + 1);
   let at = hard ? -1 : window.lastIndexOf('\n\n');
   if (at <= 0 && !hard) at = window.lastIndexOf('\n');
   // Only the break goes, so the next line keeps its indentation.

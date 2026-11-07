@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { after, test } from 'node:test';
 import { loadConfig, loadTools, parseImageModel, parseModel } from '../src/config.ts';
 
 const base = { MATTERMOST_URL: 'http://mm.local/', MATTERMOST_TOKEN: 'mm', MODEL: 'mistral/mistral-small-2603' };
@@ -42,39 +42,23 @@ test('IMAGE_MODEL is a provider/model without a thinking level, and unset by def
 });
 
 test('APPEND_SYSTEM.md sits next to the MCP config', () => {
-  const env = base;
-  assert.equal(loadConfig(env).appendSystemPromptPath, join(process.cwd(), 'APPEND_SYSTEM.md'));
+  assert.equal(loadConfig(base).appendSystemPromptPath, join(process.cwd(), 'APPEND_SYSTEM.md'));
   const path = write({ mcpServers: {} });
-  assert.equal(loadConfig({ ...env, MCP_CONFIG: path }).appendSystemPromptPath, join(path, '..', 'APPEND_SYSTEM.md'));
+  assert.equal(loadConfig({ ...base, MCP_CONFIG: path }).appendSystemPromptPath, join(path, '..', 'APPEND_SYSTEM.md'));
 });
 
-test('SCHEDULER is off unless set to true or 1', () => {
-  const env = base;
-  assert.equal(loadConfig(env).scheduler, false);
-  assert.equal(loadConfig({ ...env, SCHEDULER: 'true' }).scheduler, true);
-  assert.equal(loadConfig({ ...env, SCHEDULER: '1' }).scheduler, true);
-  assert.equal(loadConfig({ ...env, SCHEDULER: '0' }).scheduler, false);
-  assert.throws(() => loadConfig({ ...env, SCHEDULER: 'yes' }), /SCHEDULER must be true or false/);
-});
-
-test('CODEMODE is off unless set to true or 1', () => {
-  const env = base;
-  assert.equal(loadConfig(env).codemode, false);
-  assert.equal(loadConfig({ ...env, CODEMODE: 'true' }).codemode, true);
-  assert.equal(loadConfig({ ...env, CODEMODE: '1' }).codemode, true);
-  assert.equal(loadConfig({ ...env, CODEMODE: '0' }).codemode, false);
-  assert.throws(() => loadConfig({ ...env, CODEMODE: 'yes' }), /CODEMODE must be true or false/);
-});
-
-test('ALLOW_PICKING_MODEL is off unless set to true or 1', () => {
-  assert.equal(loadConfig(base).pickModel, false);
-  assert.equal(loadConfig({ ...base, ALLOW_PICKING_MODEL: 'true' }).pickModel, true);
-  assert.equal(loadConfig({ ...base, ALLOW_PICKING_MODEL: '1' }).pickModel, true);
-  assert.throws(() => loadConfig({ ...base, ALLOW_PICKING_MODEL: 'yes' }), /ALLOW_PICKING_MODEL must be true or false/);
-});
+for (const [name, key] of [['SCHEDULER', 'scheduler'], ['CODEMODE', 'codemode'], ['ALLOW_PICKING_MODEL', 'pickModel']] as const) {
+  test(`${name} is off unless set to true or 1`, () => {
+    assert.equal(loadConfig(base)[key], false);
+    assert.equal(loadConfig({ ...base, [name]: 'true' })[key], true);
+    assert.equal(loadConfig({ ...base, [name]: '1' })[key], true);
+    assert.equal(loadConfig({ ...base, [name]: '0' })[key], false);
+    assert.throws(() => loadConfig({ ...base, [name]: 'yes' }), new RegExp(`${name} must be true or false`));
+  });
+}
 
 test('MCP_CONFIG must exist when set; the default mcp.json may be missing', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-'));
+  const dir = tempDir();
   const env = { ...base, MCP_CONFIG: join(dir, 'missing.json') };
   assert.throws(() => loadConfig(env), /does not exist/);
   assert.deepEqual(loadTools(join(dir, 'mcp.json'), false), { allowedUsers: undefined, mcpServers: {} });
@@ -94,8 +78,17 @@ test('rejects malformed tool configs', () => {
   assert.throws(() => loadTools(write({ allowedUsers: 'a' }), true), /"allowedUsers" must be a list/);
 });
 
+const dirs: string[] = [];
+after(() => dirs.forEach((dir) => rmSync(dir, { recursive: true, force: true })));
+
+function tempDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-'));
+  dirs.push(dir);
+  return dir;
+}
+
 function write(content: unknown): string {
-  const path = join(mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-')), 'mcp.json');
+  const path = join(tempDir(), 'mcp.json');
   writeFileSync(path, JSON.stringify(content));
   return path;
 }

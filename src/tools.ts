@@ -1,5 +1,6 @@
 import { type ImageApi, type ImageContent, type ImageModel, Type } from '@earendil-works/pi-ai';
 import { defineTool, type ExtensionFactory, type McpServerConfig, type ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { textOf } from './content.ts';
 import { errorMessage } from './error.ts';
 
 const BLOCKED = 'Tools are off in this thread: someone who has posted in it is not allowed to use them.';
@@ -101,10 +102,7 @@ export function imageGeneration(models: Pick<ModelRuntime, 'generateImages'>, mo
           const given = edits ? await store.get(refs) : [];
           const result = await models.generateImages(model, { input: [{ type: 'text', text: prompt }, ...given] }, { signal });
           if (result.stopReason !== 'stop') throw new Error(result.errorMessage ?? `Image generation ${result.stopReason}`);
-          const text = result.output
-            .flatMap((c) => (c.type === 'text' ? [c.text] : []))
-            .join('\n')
-            .trim();
+          const text = textOf(result.output, '\n').trim();
           const images = result.output.filter((c): c is ImageContent => c.type === 'image');
           if (!images.length) throw new Error(`${model.id} returned no image${text ? `: ${text}` : ''}`);
           // Copies, as pi re-encodes the result's images.

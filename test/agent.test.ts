@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import { buildSystemPrompt, createAgent, directServers, permalink } from '../src/agent.ts';
 import { loadConfig } from '../src/config.ts';
@@ -43,50 +45,79 @@ test('tells the model how to give generate_image images only when it takes them'
 });
 
 /** An agent on `local/small`, from a models.json that also has `local/large`, which takes images. */
-async function localAgent() {
-  const dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-'));
+const dirs: string[] = [];
+after(() => dirs.forEach((dir) => rmSync(dir, { recursive: true, force: true })));
+
+/**
+ * An OpenAI-compatible endpoint that answers every request with "hello", streamed as pi asks for it.
+ * `models` are the models asked for, in order.
+ */
+async function fakeLlm() {
+  const models: string[] = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => (body += chunk));
+    req.on('end', () => {
+      models.push((JSON.parse(body) as { model: string }).model);
+      const chunk = (delta: object, finish: string | null) =>
+        `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', created: 0, model: 'm', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(`${chunk({ role: 'assistant', content: 'hello' }, null)}${chunk({}, 'stop')}data: [DONE]\n\n`);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  return { url: `http://127.0.0.1:${port}/v1`, models, close: () => server.close() };
+}
+
+/** An agent in `dir` on `local/small`, from a models.json that also has `local/large`, which takes images. */
+async function localAgent(baseUrl = 'http://127.0.0.1:1/v1', dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-'))) {
+  dirs.push(dir);
   const models = [
     { id: 'small', contextWindow: 8192, reasoning: true },
     { id: 'large', contextWindow: 8192, reasoning: true, input: ['text', 'image'] },
   ];
-  writeFileSync(join(dir, 'models.json'), JSON.stringify({ providers: { local: { baseUrl: 'http://127.0.0.1:1/v1', api: 'openai-completions', apiKey: 'none', models } } }));
+  writeFileSync(join(dir, 'models.json'), JSON.stringify({ providers: { local: { baseUrl, api: 'openai-completions', apiKey: 'none', models } } }));
   writeFileSync(join(dir, 'mcp.json'), '{}');
   const env = { MATTERMOST_URL: 'http://mm.local', MATTERMOST_TOKEN: 'mm', MODEL: 'local/small', MCP_CONFIG: join(dir, 'mcp.json'), DATA_DIR: dir };
-  return createAgent(loadConfig(env), 'sailor');
+  return { agent: await createAgent(loadConfig(env), 'sailor'), dir };
 }
 
 test('picks models pi knows, and only names providers it knows as models', async () => {
-  const agent = await localAgent();
+  const { agent } = await localAgent();
   assert.deepEqual(agent.pickModel('local/large:high'), { provider: 'local', model: 'large', thinkingLevel: 'high' });
   assert.equal(agent.pickModel('etc/hosts'), undefined);
   assert.equal(agent.pickModel('/local/large'), undefined);
   assert.throws(() => agent.pickModel('local/huge'), /^Error: there is no model local\/huge$/);
 });
 
-test('a session runs on the model it was created with, MODEL by default', async () => {
-  const agent = await localAgent();
+test('a session runs on the model it was created with, MODEL by default', async (t) => {
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent, dir } = await localAgent(llm.url);
   const options = { allowTools: () => false };
-  let session = await agent.openSession('r1', { ...options, model: { provider: 'local', model: 'large', thinkingLevel: 'high' } });
-  assert.equal(session.model?.id, 'large');
-  // pi writes the session file once it has an answer.
-  session.sessionManager.appendMessage({ role: 'user', content: 'hi', timestamp: Date.now() });
-  session.sessionManager.appendMessage({
-    role: 'assistant',
-    content: [{ type: 'text', text: 'hello' }],
-    api: 'openai-completions',
-    provider: 'local',
-    model: 'large',
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-    stopReason: 'stop',
-    timestamp: Date.now(),
-  } satisfies AssistantMessage);
-  await agent.closeSession(session);
+  const large = { provider: 'local', model: 'large', thinkingLevel: 'high' } as const;
+
+  let session = await agent.openSession('r1', { ...options, model: large });
+  assert.deepEqual([session.model, session.takesImages], [large, true]);
+  // A thread has a session once it has been prompted, as pi writes its file then.
+  assert.equal(agent.hasSession('r1'), false);
+  await session.prompt('hi');
+  assert.equal(agent.hasSession('r1'), true);
+  const answer = session.messages.at(-1) as AssistantMessage;
+  assert.deepEqual([answer.role, answer.content], ['assistant', [{ type: 'text', text: 'hello' }]]);
+  await session.close();
 
   session = await agent.openSession('r1', options);
-  assert.deepEqual([session.model?.id, session.thinkingLevel, session.model?.input], ['large', 'high', ['text', 'image']]);
-  await agent.closeSession(session);
+  assert.deepEqual([session.model, session.takesImages], [large, true]);
+  await session.close();
 
   session = await agent.openSession('r2', options);
-  assert.deepEqual([session.model?.id, session.thinkingLevel], ['small', 'off']);
-  await agent.closeSession(session);
+  assert.deepEqual([session.model, session.takesImages], [{ provider: 'local', model: 'small', thinkingLevel: 'off' }, false]);
+  await session.close();
+  assert.deepEqual(llm.models, ['large']);
+
+  // A restarted bot finds the threads that have sessions on disk.
+  const { agent: restarted } = await localAgent(llm.url, dir);
+  assert.deepEqual([restarted.hasSession('r1'), restarted.hasSession('r2')], [true, false]);
 });

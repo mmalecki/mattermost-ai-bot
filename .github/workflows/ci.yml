@@ -21,6 +21,17 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      # Installs the package as npm would, outside this checkout and without the lockfile, and runs its
+      # bin: every module loads, and it stops only for want of configuration.
+      - name: Package works when installed
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          mkdir "$RUNNER_TEMP/installed" && cd "$RUNNER_TEMP/installed"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund "$RUNNER_TEMP"/mmalecki-mattermost-ai-bot-*.tgz
+          if out=$(npx --no-install mattermost-ai-bot 2>&1); then echo "$out"; exit 1; fi
+          echo "$out"
+          grep -q 'MATTERMOST_URL is not set' <<< "$out"
 
   # Builds on pull requests, and publishes to ghcr.io/<owner>/<repo> on pushes: the `latest` branch is
   # tagged `latest`, `v*` tags by their version, and every push by its commit.

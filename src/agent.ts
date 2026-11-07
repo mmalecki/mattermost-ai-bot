@@ -1,6 +1,7 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { ImageContent } from '@earendil-works/pi-ai';
 import {
   type AgentSession,
   createAgentSession,
@@ -10,6 +11,7 @@ import {
   DefaultResourceLoader,
   type McpServerConfig,
   ModelRuntime,
+  type SessionEntry,
   SessionManager,
   SettingsManager,
 } from '@earendil-works/pi-coding-agent';
@@ -23,14 +25,17 @@ import { type ImageStore, imageGeneration, mcpServers, toolGuard, withoutCwd } f
 const FEATHER_PI_WEB = dirname(fileURLToPath(import.meta.resolve('@mmalecki/feather-pi-web/package.json')));
 
 export interface Agent {
-  /** Whether generate_image takes images to change, which posts' images are then given with their file ids for. */
+  /**
+   * Whether generate_image can change images it is given. If so, the model needs the file ids of the
+   * images posted in a thread, to pass them on.
+   */
   readonly imageEdits: boolean;
   /** Whether the thread has a session from an earlier run. */
   hasSession(rootId: string): boolean;
   /**
-   * The model `ref`, as `provider/model[:thinking]`, names, or undefined when it names no provider
-   * pi knows, so isn't a model at all. Throws, saying why for the thread, when the provider has no such
-   * model, or no API key.
+   * Parses `ref`, written `provider/model[:thinking]`, as a model to run a thread on. Returns
+   * undefined when pi knows no such provider, so `ref` is ordinary text rather than a model. Throws
+   * when the provider is known but lacks the model or an API key; the message is meant for the thread.
    */
   pickModel(ref: string): ModelChoice | undefined;
   /**
@@ -48,9 +53,29 @@ export interface Agent {
       onScheduled?: (job: ScheduledJob) => void;
       imageStore?: ImageStore;
     },
-  ): Promise<AgentSession>;
+  ): Promise<ThreadSession>;
+}
+
+type AgentMessage = AgentSession['messages'][number];
+
+/** A thread's session: what the bot needs of pi's. */
+export interface ThreadSession {
+  /** The model it runs on. */
+  readonly model: ModelChoice;
+  /** Whether that model takes images. */
+  readonly takesImages: boolean;
+  /** The conversation so far. */
+  readonly messages: readonly AgentMessage[];
+  /** Runs the agent on `text`, with `images`, until it is done answering. */
+  prompt(text: string, images?: ImageContent[]): Promise<void>;
+  /** Stops the run in progress. */
+  abort(): Promise<void>;
+  /** The session file's entries, oldest first. */
+  entries(): SessionEntry[];
+  /** Records `data` in the session file, outside the model's context. */
+  appendEntry(customType: string, data: unknown): void;
   /** Shuts down the session's extensions, which closes their connections and timers, and disposes it. */
-  closeSession(session: AgentSession): Promise<void>;
+  close(): Promise<void>;
 }
 
 /** `botUsername` is the bot's Mattermost username, so the model knows when it is addressed. */
@@ -114,6 +139,15 @@ export async function createAgent(config: Config, botUsername: string): Promise<
   if (schedulerExtension) console.log('Scheduler: on');
 
   const sessionFile = (rootId: string) => join(sessionDir, `${rootId}.jsonl`);
+  // Threads with a session file, kept here rather than looked up on every post. pi writes the file
+  // with the first prompt, so a thread counts from then on.
+  const sessions = new Set(
+    existsSync(sessionDir)
+      ? readdirSync(sessionDir)
+          .filter((name) => name.endsWith('.jsonl'))
+          .map((name) => name.slice(0, -'.jsonl'.length))
+      : [],
+  );
 
   async function closeSession(session: AgentSession): Promise<void> {
     // As pi's own runtime does: dispose() alone leaves the extensions running.
@@ -129,7 +163,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
 
   return {
     imageEdits,
-    hasSession: (rootId) => existsSync(sessionFile(rootId)),
+    hasSession: (rootId) => sessions.has(rootId),
 
     pickModel(ref) {
       let choice;
@@ -214,10 +248,22 @@ export async function createAgent(config: Config, botUsername: string): Promise<
         await closeSession(session);
         throw error;
       }
-      return session;
+      return {
+        model: { provider: model.provider, model: model.id, thinkingLevel },
+        takesImages: images,
+        get messages() {
+          return session.messages;
+        },
+        prompt: (text, images = []) => {
+          sessions.add(rootId);
+          return session.prompt(text, { expandPromptTemplates: false, images });
+        },
+        abort: () => session.abort(),
+        entries: () => session.sessionManager.getEntries(),
+        appendEntry: (customType, data) => session.sessionManager.appendCustomEntry(customType, data),
+        close: () => closeSession(session),
+      };
     },
-
-    closeSession,
   };
 }
 
