@@ -1,6 +1,6 @@
 import type { AssistantMessage, ImageContent } from '@earendil-works/pi-ai';
 import type { Agent, ThreadSession } from './agent.ts';
-import type { ModelChoice } from './config.ts';
+import type { AllowedUsers, ModelChoice } from './config.ts';
 import { textOf } from './content.ts';
 import { errorMessage } from './error.ts';
 import { download, imageSource, ThreadImages } from './images.ts';
@@ -61,8 +61,8 @@ export interface IncomingPost {
 
 export interface ThreadsOptions {
   botUserId: string;
-  /** Usernames who may have the agent call tools. Unset lets everyone. */
-  allowedUsers: Set<string> | undefined;
+  /** The tools each username may have the agent call. Unset lets everyone call every tool. */
+  allowedUsers: AllowedUsers | undefined;
   /** Idle sessions are closed after this long, and reopened from their file on the next post. */
   idleMs: number;
   /** Whether the post that starts a thread may pick its model, with a trailing `/provider/model[:thinking]`. */
@@ -162,8 +162,8 @@ class Thread {
   /** Scheduled jobs that came due, run after any new posts. */
   readonly #jobs: ScheduledJob[] = [];
   readonly #images: ThreadImages;
-  /** Whether the current run may call tools. */
-  #allowed = false;
+  /** Whether the current run may call a tool, by its name. */
+  #allowed: (toolName: string) => boolean = () => false;
   #idleTimer: NodeJS.Timeout | undefined;
   #closed = false;
 
@@ -239,7 +239,7 @@ class Thread {
   async #open(model?: ModelChoice): Promise<ThreadSession> {
     return (this.#session ??= await this.#context.agent.openSession(this.#rootId, {
       model,
-      allowTools: () => this.#allowed,
+      allowTools: (toolName) => this.#allowed(toolName),
       onScheduled: (due) => this.due(due),
       imageStore: this.#images,
     }));
@@ -345,21 +345,22 @@ class Thread {
   }
 
   /**
-   * Sets #allowed for this run: whether everyone the agent has seen a post from may have it call tools,
-   * so a single post from anyone else turns them off. `userIds` are this run's new posts' authors; the
-   * session's recorded ones count too, deleted posts' included, as the agent has seen what they wrote.
-   * An author who can no longer be looked up isn't allowed.
+   * Sets #allowed for this run: the tools everyone the agent has seen a post from may have it call, so
+   * a single post from anyone with fewer tools takes the others away. `userIds` are this run's new
+   * posts' authors; the session's recorded ones count too, deleted posts' included, as the agent has
+   * seen what they wrote. An author who can no longer be looked up, or isn't in the allowlist, has none.
    */
   async #allowTools(seen: Seen, userIds: Iterable<string>): Promise<void> {
     const { chat, options } = this.#context;
     const { allowedUsers } = options;
     if (!allowedUsers) {
-      this.#allowed = true;
+      this.#allowed = () => true;
       return;
     }
     const ids = new Set([...seen.userIds, ...userIds]);
     const names = await Promise.all([...ids].map((id) => chat.username(id).catch(() => undefined)));
-    this.#allowed = names.every((name) => name !== undefined && allowedUsers.has(name));
+    const patterns = names.map((name) => (name === undefined ? undefined : allowedUsers.get(name)));
+    this.#allowed = patterns.every((p) => p !== undefined) ? (toolName) => patterns.every((p) => p.test(toolName)) : () => false;
   }
 
   async #answer(session: ThreadSession, prompt: string, images: ImageContent[] = []): Promise<void> {

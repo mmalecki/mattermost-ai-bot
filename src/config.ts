@@ -32,11 +32,14 @@ export interface Config {
 }
 
 export interface ToolsConfig {
-  /** Mattermost usernames who may have the agent call tools. Unset lets everyone. */
-  allowedUsers: Set<string> | undefined;
+  /** The tools each Mattermost username may have the agent call. Unset lets everyone call every tool. */
+  allowedUsers: AllowedUsers | undefined;
   /** MCP servers in pi's `mcp.json` format, validated by pi when registered. */
   mcpServers: Record<string, McpServerConfig>;
 }
+
+/** Usernames, and for each, a pattern matching the names of the tools they may have the agent call. */
+export type AllowedUsers = Map<string, RegExp>;
 
 /** A model a thread can run on, as MODEL names one. */
 export type ModelChoice = Pick<Config['llm'], 'provider' | 'model' | 'thinkingLevel'>;
@@ -115,7 +118,10 @@ export function parseImageModel(ref: string): NonNullable<Config['imageModel']> 
   return { provider: parsed.provider, model: parsed.model };
 }
 
-/** Reads pi's `mcp.json` format, plus a top-level `allowedUsers` list that gates every tool call. */
+/**
+ * Reads pi's `mcp.json` format, plus a top-level `allowedUsers` that gates every tool call: a list of
+ * usernames who may use every tool, or an object giving each username the tools they may use.
+ */
 export function loadTools(path: string, required: boolean): ToolsConfig {
   if (!existsSync(path)) {
     if (required) throw new Error(`${path} does not exist`);
@@ -130,14 +136,49 @@ export function loadTools(path: string, required: boolean): ToolsConfig {
   if (!isRecord(parsed) || (parsed.mcpServers !== undefined && !isRecord(parsed.mcpServers))) {
     throw new Error(`${path}: expected an object with an "mcpServers" object`);
   }
-  const { allowedUsers } = parsed;
-  if (allowedUsers !== undefined && !(Array.isArray(allowedUsers) && allowedUsers.every((u) => typeof u === 'string'))) {
-    throw new Error(`${path}: "allowedUsers" must be a list of usernames`);
+  let allowedUsers;
+  try {
+    allowedUsers = parsed.allowedUsers === undefined ? undefined : parseAllowedUsers(parsed.allowedUsers);
+  } catch (error) {
+    throw new Error(`${path}: ${errorMessage(error)}`);
   }
-  return {
-    allowedUsers: allowedUsers && new Set(allowedUsers.map((u) => u.trim().replace(/^@/, '')).filter(Boolean)),
-    mcpServers: (parsed.mcpServers ?? {}) as Record<string, McpServerConfig>,
-  };
+  return { allowedUsers, mcpServers: (parsed.mcpServers ?? {}) as Record<string, McpServerConfig> };
+}
+
+/**
+ * `allowedUsers` from `mcp.json`: `["alice", "bob"]`, who may use every tool, or
+ * `{ "alice": "*", "mail": ["mcp__parcels__*"] }`, with each user's tools as a name or pattern, or a
+ * list of them. In a pattern, `*` matches any characters. Usernames may start with `@`.
+ */
+export function parseAllowedUsers(value: unknown): AllowedUsers {
+  const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === 'string');
+  let entries: [string, string[]][];
+  if (strings(value)) {
+    entries = value.map((user) => [user, ['*']]);
+  } else if (isRecord(value)) {
+    entries = Object.entries(value).map(([user, tools]) => {
+      if (typeof tools === 'string') return [user, [tools]];
+      if (strings(tools)) return [user, tools];
+      throw new Error(`"allowedUsers": the tools of "${user}" must be a name or pattern, or a list of them`);
+    });
+  } else {
+    throw new Error('"allowedUsers" must be a list of usernames, or an object giving each username their tools');
+  }
+  const tools = new Map<string, string[]>();
+  for (const [user, patterns] of entries) {
+    const name = user.trim().replace(/^@/, '');
+    if (name) tools.set(name, [...(tools.get(name) ?? []), ...patterns]);
+  }
+  return new Map([...tools].map(([user, patterns]) => [user, toolPattern(patterns)]));
+}
+
+/** Matches tool names that are one of `patterns`, where `*` matches any characters. None matches nothing. */
+function toolPattern(patterns: string[]): RegExp {
+  const alternatives = patterns
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => p.split('*').map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*'));
+  return new RegExp(alternatives.length ? `^(?:${alternatives.join('|')})$` : '(?!)');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

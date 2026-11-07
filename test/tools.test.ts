@@ -4,7 +4,7 @@ import type { AssistantImages, ImageApi, ImageContent, ImageModel } from '@earen
 import type { ExtensionAPI, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { type ImageStore, imageGeneration, mcpServers, stripCwd, toolGuard } from '../src/tools.ts';
 
-const BLOCKED = 'Tools are off in this thread: someone who has posted in it is not allowed to use them.';
+const blocked = (toolName: string) => ({ block: true, reason: `${toolName} is off in this thread: someone who has posted in it is not allowed to use it.` });
 
 test('registers each configured MCP server, skipping ones pi rejects', (t) => {
   const registered: string[] = [];
@@ -29,7 +29,7 @@ test('blocks every tool call unless allowed', () => {
   assert.equal(onToolCall({ toolName: 'websearch' }), undefined);
   allowed = false;
   for (const toolName of ['websearch', 'mcp__home__intent__HassTurnOn', 'codemode']) {
-    assert.deepEqual(onToolCall({ toolName }), { block: true, reason: BLOCKED });
+    assert.deepEqual(onToolCall({ toolName }), blocked(toolName));
   }
 });
 
@@ -44,7 +44,7 @@ test('tells the guard which tool is called', () => {
   const pi = { on: (_event: string, handler: typeof onToolCall) => (onToolCall = handler) };
   toolGuard((name) => name === 'websearch')(pi as unknown as ExtensionAPI);
   assert.equal(onToolCall({ toolName: 'websearch' }), undefined);
-  assert.deepEqual(onToolCall({ toolName: 'mcp__home__intent__HassTurnOn' }), { block: true, reason: BLOCKED });
+  assert.deepEqual(onToolCall({ toolName: 'mcp__home__intent__HassTurnOn' }), blocked('mcp__home__intent__HassTurnOn'));
 });
 
 const PAINTER = { provider: 'openrouter', id: 'google/gemini-2.5-flash-image', input: ['text'] } as ImageModel<ImageApi>;
