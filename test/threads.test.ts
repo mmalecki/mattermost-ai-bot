@@ -360,7 +360,7 @@ test("a post whose author can't be looked up any more is answered by id, not ret
   threads.handle(incoming('r1', chat.add('r1', 'u2', 'and the heating?')));
   await threads.idle();
 
-  // Answered, not failed and retried on every later post; tools off, as #mayUseTools says.
+  // Answered, not failed and retried on every later post; tools off, as #allowTools says.
   assert.deepEqual(chat.replies.map((r) => r.message), ['ok', 'ok']);
   assert.deepEqual(sessions.get('r1')!.allowed, [true, false]);
   assert.match(sessions.get('r1')!.prompts[1]!, /^@u2 \(.+\): and the heating\?$/);

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import { buildSystemPrompt, createAgent, directServers, permalink } from '../src/agent.ts';
 import { loadConfig } from '../src/config.ts';
@@ -43,8 +43,12 @@ test('tells the model how to give generate_image images only when it takes them'
 });
 
 /** An agent on `local/small`, from a models.json that also has `local/large`, which takes images. */
+const dirs: string[] = [];
+after(() => dirs.forEach((dir) => rmSync(dir, { recursive: true, force: true })));
+
 async function localAgent() {
   const dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-'));
+  dirs.push(dir);
   const models = [
     { id: 'small', contextWindow: 8192, reasoning: true },
     { id: 'large', contextWindow: 8192, reasoning: true, input: ['text', 'image'] },
