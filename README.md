@@ -140,10 +140,14 @@ minute for a recurring one, and a thread can have 10 jobs.
 
 ```sh
 npm install -g @mmalecki/mattermost-ai-bot
+mattermost-ai-bot
 
 # or:
 npx @mmalecki/mattermost-ai-bot
 ```
+
+Run it in the directory with `.env`, `mcp.json`, `models.json` and `APPEND_SYSTEM.md`. Variables already set in the
+environment win over `.env`. It needs `git` to install, for pi-ate-scheduler.
 
 ### Docker
 ```sh
@@ -174,7 +178,8 @@ npm install
 npm start
 ```
 
-`npm test` runs the tests, `npm run typecheck` checks types.
+`npm test` runs the tests, `npm run typecheck` checks types. Both, and `npm start`, run the TypeScript sources
+directly; `npm run build` compiles them to `dist/`, which the npm package runs, and `npm pack` builds first.
 
 On first `SIGINT` or `SIGTERM`, the bot stops handling new posts and exits once running threads finish their current run.
 Second signal exits at once.

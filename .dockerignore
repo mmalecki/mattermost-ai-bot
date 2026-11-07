@@ -6,3 +6,4 @@ mcp.json
 models.json
 APPEND_SYSTEM.md
 eval/results/
+dist/

@@ -21,15 +21,24 @@
   "engines": {
     "node": ">=24.1"
   },
+  "bin": {
+    "mattermost-ai-bot": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "mcp.example.json"
+  ],
   "scripts": {
-    "start": "node --env-file-if-exists=.env src/index.ts",
+    "start": "node src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "node --test \"test/**/*.test.ts\"",
     "eval": "node --env-file-if-exists=.env eval/tool-use.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^1.4.0",
-    "@earendil-works/pi-coding-agent": "^1.4.0",
+    "@earendil-works/pi-ai": "~1.4.0",
+    "@earendil-works/pi-coding-agent": "~1.4.0",
     "@mattermost/client": "^11.9.0",
     "@mattermost/types": "^11.9.0",
     "@mmalecki/feather-pi-web": "^0.2.0",
