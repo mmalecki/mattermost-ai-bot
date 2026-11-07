@@ -50,15 +50,18 @@ after(() => dirs.forEach((dir) => rmSync(dir, { recursive: true, force: true }))
 
 /**
  * An OpenAI-compatible endpoint that answers every request with "hello", streamed as pi asks for it.
- * `models` are the models asked for, in order.
+ * `models` are the models asked for, in order, and `tools` the names of the tools each request declared.
  */
 async function fakeLlm() {
   const models: string[] = [];
+  const tools: string[][] = [];
   const server = createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => (body += chunk));
     req.on('end', () => {
-      models.push((JSON.parse(body) as { model: string }).model);
+      const request = JSON.parse(body) as { model: string; tools?: { function: { name: string } }[] };
+      models.push(request.model);
+      tools.push((request.tools ?? []).map((t) => t.function.name));
       const chunk = (delta: object, finish: string | null) =>
         `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', created: 0, model: 'm', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
       res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -67,7 +70,7 @@ async function fakeLlm() {
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
-  return { url: `http://127.0.0.1:${port}/v1`, models, close: () => server.close() };
+  return { url: `http://127.0.0.1:${port}/v1`, models, tools, close: () => server.close() };
 }
 
 /** An agent in `dir` on `local/small`, from a models.json that also has `local/large`, which takes images. */
@@ -120,4 +123,32 @@ test('a session runs on the model it was created with, MODEL by default', async 
   // A restarted bot finds the threads that have sessions on disk.
   const { agent: restarted } = await localAgent(llm.url, dir);
   assert.deepEqual([restarted.hasSession('r1'), restarted.hasSession('r2')], [true, false]);
+});
+
+test('the model is declared only the tools the thread may use, which stay away until the session is reopened', async (t) => {
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent } = await localAgent(llm.url);
+  let allowed = (_name: string) => true;
+  const session = await agent.openSession('r1', { allowTools: (name) => allowed(name) });
+  await session.prompt('hi');
+  assert.ok(llm.tools[0]!.includes('webfetch'));
+
+  allowed = (name) => name !== 'webfetch';
+  await session.prompt('fetch this');
+  assert.deepEqual(llm.tools[1], llm.tools[0]!.filter((name) => name !== 'webfetch'));
+
+  allowed = () => true;
+  await session.prompt('and again');
+  assert.deepEqual(llm.tools[2], llm.tools[1]);
+  await session.close();
+
+  // A reopened session declares its tools afresh, and they are taken away again as needed.
+  const reopened = await agent.openSession('r1', { allowTools: (name) => allowed(name) });
+  await reopened.prompt('now?');
+  assert.deepEqual(llm.tools[3], llm.tools[0]);
+  allowed = (name) => name !== 'webfetch';
+  await reopened.prompt('and now?');
+  assert.deepEqual(llm.tools[4], llm.tools[1]);
+  await reopened.close();
 });

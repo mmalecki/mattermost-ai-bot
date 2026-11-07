@@ -101,7 +101,8 @@ data retention, rules out.
 `mcp.json` uses [Pi's MCP configuration format](https://pi.dev/docs/latest/mcp), with one addition: `allowedUsers`, the
 Mattermost users who may have the agent call tools. It covers every tool call, the built-in web tools included, and
 a thread has tools only while everyone who has posted in it is one of them: a single post from anyone else, even one
-deleted later, turns them off in that thread, scheduled jobs included. Without `allowedUsers`, everyone may use tools.
+deleted later, turns them off in that thread, scheduled jobs included. Without `allowedUsers`, everyone may use every
+tool.
 
 ```json
 {
@@ -115,6 +116,33 @@ deleted later, turns them off in that thread, scheduled jobs included. Without `
   }
 }
 ```
+
+To give users only some tools, make `allowedUsers` an object, with each user's tools as a name, or a list of names,
+which can be [globs](https://github.com/micromatch/micromatch#matching-features) such as `mcp__homeassistant__*`. A
+thread then has only the tools everyone who has posted in it may use. For example, a mailbox bridge like
+[mail2most](https://github.com/Virtomize/mail2most), posting emails for the agent to file away, can be kept to the write
+tools of one server with `direct` exposure, even in a thread where `alice` has posted too:
+
+```json
+{
+  "allowedUsers": {
+    "alice": "*",
+    "bob": ["websearch", "webfetch", "mcp__homeassistant__*"],
+    "mail2most": ["mcp__parcels__create_entities", "mcp__parcels__add_observations"]
+  }
+}
+```
+
+Tool names are as the model sees them: an MCP server's are `mcp__<server>__<tool>`, with characters other than
+letters, digits and `_` in the server's name turned into `_`. The others are `websearch`, `webfetch`, `generate_image`
+and `schedule`, and Pi's `codemode` and `tool_search`, which servers with `codemode` and `deferred` exposure are
+reached through. Tools called from `codemode` scripts are checked one by one too, but scripts can also use models, so
+give `codemode` only to those trusted with the rest.
+
+The model is shown only the tools the thread may use. Tools taken away in a thread that `allowedUsers` gives back later
+are shown again once its session is reopened, after it idles out or the bot restarts. `codemode` and `tool_search`
+still list every tool they reach, and calls to those that aren't allowed are blocked, as are calls to any other tool
+the model knows of.
 
 Values such as `${HASS_TOKEN}` are read from the environment, so secrets can stay in `.env`. As in Pi, a server's
 `exposure` defaults to `codemode`, where the model reaches its tools through scripts; `direct` declares them to the model

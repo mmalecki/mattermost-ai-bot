@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { CreateAgentSessionOptions, McpServerConfig } from '@earendil-works/pi-coding-agent';
+import micromatch from 'micromatch';
 import { errorMessage } from './error.ts';
 
 export interface Config {
@@ -32,11 +33,14 @@ export interface Config {
 }
 
 export interface ToolsConfig {
-  /** Mattermost usernames who may have the agent call tools. Unset lets everyone. */
-  allowedUsers: Set<string> | undefined;
+  /** The tools each Mattermost username may have the agent call. Unset lets everyone call every tool. */
+  allowedUsers: AllowedUsers | undefined;
   /** MCP servers in pi's `mcp.json` format, validated by pi when registered. */
   mcpServers: Record<string, McpServerConfig>;
 }
+
+/** Usernames, and for each, whether they may have the agent call a tool, by its name. */
+export type AllowedUsers = Map<string, (toolName: string) => boolean>;
 
 /** A model a thread can run on, as MODEL names one. */
 export type ModelChoice = Pick<Config['llm'], 'provider' | 'model' | 'thinkingLevel'>;
@@ -115,7 +119,10 @@ export function parseImageModel(ref: string): NonNullable<Config['imageModel']> 
   return { provider: parsed.provider, model: parsed.model };
 }
 
-/** Reads pi's `mcp.json` format, plus a top-level `allowedUsers` list that gates every tool call. */
+/**
+ * Reads pi's `mcp.json` format, plus a top-level `allowedUsers` that gates every tool call: a list of
+ * usernames who may use every tool, or an object giving each username the tools they may use.
+ */
 export function loadTools(path: string, required: boolean): ToolsConfig {
   if (!existsSync(path)) {
     if (required) throw new Error(`${path} does not exist`);
@@ -130,14 +137,47 @@ export function loadTools(path: string, required: boolean): ToolsConfig {
   if (!isRecord(parsed) || (parsed.mcpServers !== undefined && !isRecord(parsed.mcpServers))) {
     throw new Error(`${path}: expected an object with an "mcpServers" object`);
   }
-  const { allowedUsers } = parsed;
-  if (allowedUsers !== undefined && !(Array.isArray(allowedUsers) && allowedUsers.every((u) => typeof u === 'string'))) {
-    throw new Error(`${path}: "allowedUsers" must be a list of usernames`);
+  let allowedUsers;
+  try {
+    allowedUsers = parsed.allowedUsers === undefined ? undefined : parseAllowedUsers(parsed.allowedUsers);
+  } catch (error) {
+    throw new Error(`${path}: ${errorMessage(error)}`);
   }
-  return {
-    allowedUsers: allowedUsers && new Set(allowedUsers.map((u) => u.trim().replace(/^@/, '')).filter(Boolean)),
-    mcpServers: (parsed.mcpServers ?? {}) as Record<string, McpServerConfig>,
-  };
+  return { allowedUsers, mcpServers: (parsed.mcpServers ?? {}) as Record<string, McpServerConfig> };
+}
+
+/**
+ * `allowedUsers` from `mcp.json`: `["alice", "bob"]`, who may use every tool, or
+ * `{ "alice": "*", "mail": ["mcp__parcels__*"] }`, with each user's tools as a name or glob, or a
+ * list of them, as micromatch takes them. Usernames may start with `@`.
+ */
+export function parseAllowedUsers(value: unknown): AllowedUsers {
+  const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === 'string');
+  let entries: [string, string[]][];
+  if (strings(value)) {
+    entries = value.map((user) => [user, ['*']]);
+  } else if (isRecord(value)) {
+    entries = Object.entries(value).map(([user, tools]) => {
+      if (typeof tools === 'string') return [user, [tools]];
+      if (strings(tools)) return [user, tools];
+      throw new Error(`"allowedUsers": the tools of "${user}" must be a name or pattern, or a list of them`);
+    });
+  } else {
+    throw new Error('"allowedUsers" must be a list of usernames, or an object giving each username their tools');
+  }
+  const tools = new Map<string, string[]>();
+  for (const [user, patterns] of entries) {
+    const name = user.trim().replace(/^@/, '');
+    if (name) tools.set(name, [...(tools.get(name) ?? []), ...patterns]);
+  }
+  return new Map([...tools].map(([user, patterns]) => [user, toolMatcher(patterns)]));
+}
+
+/** Whether a tool name matches one of `patterns`, globs as micromatch takes them. None matches nothing. */
+function toolMatcher(patterns: string[]): (toolName: string) => boolean {
+  // `dot`, so that `*` matches every name.
+  const matchers = patterns.map((p) => p.trim()).filter(Boolean).map((p) => micromatch.matcher(p, { dot: true }));
+  return (toolName) => matchers.some((matches) => matches(toolName));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

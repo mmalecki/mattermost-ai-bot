@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
-import { loadConfig, loadTools, parseImageModel, parseModel } from '../src/config.ts';
+import { loadConfig, loadTools, parseAllowedUsers, parseImageModel, parseModel } from '../src/config.ts';
 
 const base = { MATTERMOST_URL: 'http://mm.local/', MATTERMOST_TOKEN: 'mm', MODEL: 'mistral/mistral-small-2603' };
 
@@ -64,18 +64,39 @@ test('MCP_CONFIG must exist when set; the default mcp.json may be missing', () =
   assert.deepEqual(loadTools(join(dir, 'mcp.json'), false), { allowedUsers: undefined, mcpServers: {} });
 });
 
-test("reads pi's mcp.json format with an allowedUsers list", () => {
+test("reads pi's mcp.json format with an allowedUsers list, who may use every tool", () => {
   const path = write({ allowedUsers: ['@a', ' b', ''], mcpServers: { home: { url: 'http://ha/api/mcp', exposure: 'direct' } } });
   const tools = loadTools(path, true);
-  assert.deepEqual([...tools.allowedUsers!], ['a', 'b']);
+  assert.deepEqual([...tools.allowedUsers!.keys()], ['a', 'b']);
+  assert.ok(tools.allowedUsers!.get('a')!('mcp__home__HassTurnOn'));
   assert.deepEqual(tools.mcpServers, { home: { url: 'http://ha/api/mcp', exposure: 'direct' } });
   assert.equal(loadTools(write({ mcpServers: {} }), true).allowedUsers, undefined);
+});
+
+test('allowedUsers can give each user their tools, by name or glob', () => {
+  const users = parseAllowedUsers({
+    '@alice': '*',
+    mail: ['mcp__parcels__add_*', 'websearch'],
+    'mail ': 'web.fetch',
+    home: 'mcp__home__{HassTurnOn,HassTurnOff}',
+    guest: [],
+    ' ': '*',
+  });
+  const TOOLS = ['websearch', 'webfetch', 'web.fetch', '.hidden', 'mcp__parcels__add_observations', 'mcp__parcels__read_graph', 'mcp__home__HassTurnOn', 'xwebsearch'];
+  const may = (user: string) => TOOLS.filter((t) => users.get(user)!(t));
+  assert.deepEqual([...users.keys()], ['alice', 'mail', 'home', 'guest']);
+  assert.deepEqual(may('alice'), TOOLS);
+  // `.` is no wildcard, and a username given twice gets both entries' tools.
+  assert.deepEqual(may('mail'), ['websearch', 'web.fetch', 'mcp__parcels__add_observations']);
+  assert.deepEqual(may('home'), ['mcp__home__HassTurnOn']);
+  assert.deepEqual(may('guest'), []);
 });
 
 test('rejects malformed tool configs', () => {
   assert.throws(() => loadTools(write([]), true), /expected an object with an "mcpServers" object/);
   assert.throws(() => loadTools(write({ mcpServers: [] }), true), /expected an object/);
-  assert.throws(() => loadTools(write({ allowedUsers: 'a' }), true), /"allowedUsers" must be a list/);
+  assert.throws(() => loadTools(write({ allowedUsers: 'a' }), true), /"allowedUsers" must be a list of usernames, or an object/);
+  assert.throws(() => loadTools(write({ allowedUsers: { a: 1 } }), true), /the tools of "a" must be a name or pattern/);
 });
 
 const dirs: string[] = [];

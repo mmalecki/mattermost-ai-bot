@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { ImageContent } from '@earendil-works/pi-ai';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import type { Agent, ThreadSession } from '../src/agent.ts';
-import { type ModelChoice, parseModel } from '../src/config.ts';
+import { type ModelChoice, parseAllowedUsers, parseModel } from '../src/config.ts';
 import type { ScheduledJob } from '../src/scheduler.ts';
 import { type Chat, type IncomingPost, type OutgoingFile, type PostFile, type ThreadPost, Threads } from '../src/threads.ts';
 import type { ImageStore } from '../src/tools.ts';
@@ -73,7 +73,10 @@ interface FakeSession {
   model: ModelChoice | undefined;
   prompts: string[];
   images: ImageContent[][];
+  /** Whether each run could call websearch. */
   allowed: boolean[];
+  /** Which of TOOLS each run could call. */
+  tools: string[][];
   entries: unknown[];
   onScheduled: ((job: ScheduledJob) => void) | undefined;
   imageStore: ImageStore | undefined;
@@ -81,6 +84,7 @@ interface FakeSession {
 }
 
 const MODEL: ModelChoice = { provider: 'local', model: 'default', thinkingLevel: 'off' };
+const TOOLS = ['websearch', 'mcp__parcels__add_observations', 'mcp__parcels__read_graph', 'mcp__home__HassTurnOn'];
 
 /**
  * An agent whose sessions answer each prompt with `answer(prompt)`, fail when it throws, and add no
@@ -104,7 +108,7 @@ function fakeAgent(answer: Answer, images: boolean, imageEdits: boolean, closing
     async openSession(rootId, { model, allowTools, onScheduled, imageStore }) {
       events.push(`open ${rootId}`);
       const entries: unknown[] = [];
-      const record: FakeSession = { model, prompts: [], images: [], allowed: [], entries, onScheduled, imageStore, closed: false };
+      const record: FakeSession = { model, prompts: [], images: [], allowed: [], tools: [], entries, onScheduled, imageStore, closed: false };
       sessions.set(rootId, record);
       const messages: unknown[] = [];
       const session: ThreadSession = {
@@ -118,6 +122,7 @@ function fakeAgent(answer: Answer, images: boolean, imageEdits: boolean, closing
           record.prompts.push(text);
           record.images.push(images);
           record.allowed.push(allowTools('websearch'));
+          record.tools.push(TOOLS.filter(allowTools));
           try {
             const timestamp = Date.now();
             const reply = await answer(text);
@@ -145,8 +150,8 @@ function fakeAgent(answer: Answer, images: boolean, imageEdits: boolean, closing
 
 interface SetupOptions {
   answer?: Answer;
-  /** `null` leaves out the allowlist. */
-  allowlist?: string[] | null;
+  /** As `allowedUsers` in mcp.json; `null` leaves it out. */
+  allowlist?: string[] | Record<string, string | string[]> | null;
   /** Whether the model takes images. */
   images?: boolean;
   /** Whether generate_image takes images. */
@@ -159,7 +164,7 @@ interface SetupOptions {
 function setup({ answer = () => 'ok', allowlist = ['maciej'], images = true, imageEdits = false, pickModel = false, closing }: SetupOptions = {}) {
   const chat = new FakeChat();
   const { agent, sessions, events } = fakeAgent(answer, images, imageEdits, closing);
-  const threads = new Threads(agent, chat, { botUserId: BOT, allowedUsers: allowlist ? new Set(allowlist) : undefined, idleMs: 60_000, pickModel });
+  const threads = new Threads(agent, chat, { botUserId: BOT, allowedUsers: allowlist ? parseAllowedUsers(allowlist) : undefined, idleMs: 60_000, pickModel });
   return { chat, sessions, events, threads };
 }
 
@@ -384,6 +389,36 @@ test("a post whose author can't be looked up any more is answered by id, not ret
   assert.deepEqual(chat.replies.map((r) => r.message), ['ok', 'ok']);
   assert.deepEqual(sessions.get('r1')!.allowed, [true, false]);
   assert.match(sessions.get('r1')!.prompts[1]!, /^@u2 \(.+\): and the heating\?$/);
+  await threads.close();
+});
+
+test("a thread has only the tools everyone who has posted in it may use", async () => {
+  const { chat, sessions, threads } = setup({
+    allowlist: { maciej: '*', carol: ['websearch', 'mcp__parcels__*'], guest: 'mcp__parcels__add_observations' },
+  });
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'hi'), { id: 'r1', direct: true }));
+  await threads.idle();
+  threads.handle(incoming('r1', chat.add('r1', 'u3', 'what is new?')));
+  await threads.idle();
+  threads.handle(incoming('r1', chat.add('r1', 'u2', 'parcel shipped')));
+  await threads.idle();
+  // Their tools don't come back with a post from someone who has more.
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'and the lights')));
+  await threads.idle();
+  assert.deepEqual(sessions.get('r1')!.tools, [
+    TOOLS,
+    ['websearch', 'mcp__parcels__add_observations', 'mcp__parcels__read_graph'],
+    ['mcp__parcels__add_observations'],
+    ['mcp__parcels__add_observations'],
+  ]);
+  await threads.close();
+});
+
+test('a user with no tools in the allowlist turns them all off', async () => {
+  const { chat, sessions, threads } = setup({ allowlist: { maciej: '*', guest: [] } });
+  threads.handle(incoming('r1', chat.add('r1', 'u2', 'hi'), { id: 'r1', direct: true }));
+  await threads.idle();
+  assert.deepEqual(sessions.get('r1')!.tools, [[]]);
   await threads.close();
 });
 
