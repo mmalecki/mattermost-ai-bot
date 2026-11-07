@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -107,6 +107,8 @@ test('a session runs on the model it was created with, MODEL by default', async 
   assert.equal(agent.hasSession('r1'), false);
   await session.prompt('hi');
   assert.equal(agent.hasSession('r1'), true);
+  // In the thread's own directory.
+  assert.ok(existsSync(join(dir, 'sessions', 'r1', 'session.jsonl')));
   const answer = session.messages.at(-1) as AssistantMessage;
   assert.deepEqual([answer.role, answer.content], ['assistant', [{ type: 'text', text: 'hello' }]]);
   await session.close();

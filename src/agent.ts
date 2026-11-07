@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ImageContent } from '@earendil-works/pi-ai';
@@ -138,16 +138,12 @@ export async function createAgent(config: Config, botUsername: string): Promise<
   const schedulerExtension = config.scheduler ? await loadScheduler() : undefined;
   if (schedulerExtension) console.log('Scheduler: on');
 
-  const sessionFile = (rootId: string) => join(sessionDir, `${rootId}.jsonl`);
+  /** A thread's directory, which holds its session. */
+  const threadDir = (rootId: string) => join(sessionDir, rootId);
+  const sessionFile = (rootId: string) => join(threadDir(rootId), 'session.jsonl');
   // Threads with a session file, kept here rather than looked up on every post. pi writes the file
   // with the first prompt, so a thread counts from then on.
-  const sessions = new Set(
-    existsSync(sessionDir)
-      ? readdirSync(sessionDir)
-          .filter((name) => name.endsWith('.jsonl'))
-          .map((name) => name.slice(0, -'.jsonl'.length))
-      : [],
-  );
+  const sessions = new Set(existsSync(sessionDir) ? readdirSync(sessionDir).filter((rootId) => existsSync(sessionFile(rootId))) : []);
 
   async function closeSession(session: AgentSession): Promise<void> {
     // As pi's own runtime does: dispose() alone leaves the extensions running.
@@ -181,7 +177,8 @@ export async function createAgent(config: Config, botUsername: string): Promise<
     },
 
     async openSession(rootId, { model: choice, allowTools, onScheduled, imageStore }) {
-      const sessionManager = SessionManager.open(sessionFile(rootId), sessionDir, config.dataDir);
+      mkdirSync(threadDir(rootId), { recursive: true });
+      const sessionManager = SessionManager.open(sessionFile(rootId), threadDir(rootId), config.dataDir);
       const { model, thinkingLevel } = sessionModel(rootId, sessionManager, choice);
       const images = model.input.includes('image');
       const resourceLoader = new DefaultResourceLoader({
