@@ -11,7 +11,8 @@ RUN CGO_ENABLED=0 GOBIN=/out go install -trimpath -ldflags="-s -w" github.com/ok
 
 # As webdav-mcp's own Dockerfile: Zig runs on the build host and cross-compiles a static musl binary for the target.
 FROM --platform=$BUILDPLATFORM alpine:3.22 AS webdav-mcp
-ARG WEBDAV_MCP_REF=docker
+# A commit of its `docker` branch, pinned like the other sources here.
+ARG WEBDAV_MCP_REF=d09f08fd7854d72bf5267fbef71610e3558c5804
 ARG ZIG_VERSION=0.16.0
 ARG BUILDARCH
 ARG TARGETARCH
