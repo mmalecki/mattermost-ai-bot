@@ -1,15 +1,9 @@
 #!/usr/bin/env node
+import './env.ts';
 import { createAgent } from './agent.ts';
 import { loadConfig } from './config.ts';
 import { Mattermost } from './mattermost.ts';
 import { Threads } from './threads.ts';
-
-// The working directory's .env, when there is one, however the bot is started. Variables already set win.
-try {
-  process.loadEnvFile();
-} catch (error) {
-  if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-}
 
 const config = loadConfig();
 const servers = Object.keys(config.tools.mcpServers);
