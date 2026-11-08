@@ -22,8 +22,12 @@ Set in `.env`:
 * `PARALLEL_API_KEY` - enables `websearch` through [Parallel](https://parallel.ai)
 * `IMAGE_MODEL` - enables `generate_image`, with this model, as `provider/model` like `MODEL` but without thinking,
   for example `openrouter/bytedance-seed/seedream-5-0-pro`. See below
+* `VISION_MODEL` - enables `locate`, and `look_at_image` and `crop_image` where the thread's model doesn't take
+  images, with this model, which must take images, as `provider/model[:thinking]` like `MODEL`, for example
+  `openrouter/qwen/qwen3-vl-235b-a22b-instruct`. See below
 * `MCP_CONFIG` - path to the tools configuration, below. Default `./mcp.json`, which may be missing
-* `DATA_DIR` - default `./data`
+* `DATA_DIR` - default `./data`. Each thread has a directory in `sessions/`, named after its root post, with its
+  session in `session.jsonl` and its images in `images/`
 * `SCHEDULER` - `true` lets the agent schedule jobs in a thread, once or repeatedly, with
   [pi-ate-scheduler](https://github.com/catlain/pi-scheduler). Default `false`. See below
 * `CODEMODE` - `true` gives the agent [Pi's `codemode`](https://pi.dev/docs/latest/codemode) tool even when every MCP
@@ -78,24 +82,53 @@ images attached to posts, scaled down to the model's limits. Up to 8 go with eac
 names of other files, and of images when the model doesn't take them.
 
 Images are kept in the thread's session file, and sent with every later run in the thread until it's compacted.
+When the model or some tool takes images, such as `generate_image` below, posts' images are kept in the thread's
+`images/` too, the originals or Mattermost's preview, under the names they're posted with, made new to the thread,
+as `image-2.png` for a second `image.png`. The agent is given the names, seeing the images or not, and passes them to
+the tools. Nothing removes them, or the thread's session, so `sessions/` grows with every thread.
 
 ### Generating images
 With `IMAGE_MODEL` set, the agent gets a `generate_image` tool, and every image it generates in a run is attached to
-its reply, up to 10 to a post. It sees them too when the model takes images, scaled down to the model's limits and kept in
-the session file like posted images. Generating is a tool call, so only `allowedUsers` can have the agent make images.
+its reply, up to 10 to a post, and kept in the thread's `images/` as `image.png`, `image-2.png` and so on. It sees them
+too when the model takes images, scaled down to the model's limits and kept in the session file like posted images.
+Generating is a tool call, so only `allowedUsers` can have the agent make images.
 
 When the image model takes images too, as most do (`"input": ["text", "image"]` in Pi's catalog), the agent can have
-images changed, or new ones made from them: those posted in the thread, which it's given the file ids of, and those
-it generated, by name. It gets the originals, or Mattermost's preview of an image too large or in another format, and
-only from the thread's posts, so a post can't have it reach files elsewhere. Images other tools return in the thread,
-such as `webfetch` or an MCP server, are named in their results so the agent can pass them on too, as Pi keeps them:
-scaled down to the chat model's limits. Some image models take only one image at a time, such as
-`microsoft/mai-image-2.6`, which can't combine images then.
+images changed, or new ones made from them, by their names in the thread's `images/`, and only those, so a post can't
+have it reach files elsewhere: those posted in the thread, those it generated, and those other tools return, such as
+`webfetch` or an MCP server, which are kept as the tools return them, as `fetched.png` and so on, and named in their
+results. Some image models take only one image at a time, such as `microsoft/mai-image-2.6`, which can't combine
+images then.
 
 Pi generates images only through OpenRouter so far: `IMAGE_MODEL` is one of
 [its image models](https://openrouter.ai/models?output_modalities=image), and needs `OPENROUTER_API_KEY` whatever
 `MODEL` is. OpenRouter refuses models its account's [data policy](https://openrouter.ai/settings/privacy), such as zero
 data retention, rules out.
+
+### Recognizing images
+With `VISION_MODEL` set, the agent gets tools to work with the thread's images by name:
+
+* `look_at_image` asks the vision model about images, such as what one shows, or the text in it. Only when the
+  thread's model doesn't take images: one that does looks at them itself, rather than ask a likely weaker model
+* `locate` has it find things in an image, such as barcodes, a price tag or every face, as boxes. Models trained to find
+  things give far better boxes than most chat models, so the agent gets it whether its model takes images or not
+* `crop_image` cuts a box out of an image, at its full size, as an image of its own, `<name>-crop.png`, which the
+  agent can look closer at, or pass to any tool that takes images, such as an MCP server that reads barcodes. It needs
+  no model, so a thread whose model takes images has it without `VISION_MODEL` too: pi scales images down to the
+  model's limits, and a crop is how it reads small text
+
+Boxes are `[ymin, xmin, ymax, xmax]`, from 0 to 1000 of the image's height and width. The vision model is asked for
+them by name, as models trained to find things answer arrays in their own order whatever they're asked: Qwen 3 VL
+puts x first. Gemini's `box_2d` and Qwen's `bbox_2d` arrays are read too, from 0 to 1000 or in pixels. Models differ
+a lot at this: Qwen 3 VL and Gemma 4 find things well, while Claude Haiku 5.5 and Mistral Medium 3.5 only roughly,
+so try `locate` with the one you pick. The vision model is sent images scaled down to its limits, while `crop_image`
+cuts from the image as it was posted or returned, and shows the crop to the agent only when its model takes images.
+These are tool calls, so only `allowedUsers` can have the agent make them.
+
+The vision model is asked for short, factual answers, of at most 2048 tokens: left alone, Qwen 3 VL writes thousands
+of words, and can repeat itself until it runs out of tokens, which takes it over 20 minutes. Vision models misread
+small text, and agree with what a question suggests, so the agent is told to ask open questions, and to check the
+text read on a crop.
 
 ### Tools
 `mcp.json` uses [Pi's MCP configuration format](https://pi.dev/docs/latest/mcp), with one addition: `allowedUsers`, the
@@ -134,10 +167,10 @@ tools of one server with `direct` exposure, even in a thread where `alice` has p
 ```
 
 Tool names are as the model sees them: an MCP server's are `mcp__<server>__<tool>`, with characters other than
-letters, digits and `_` in the server's name turned into `_`. The others are `websearch`, `webfetch`, `generate_image`
-and `schedule`, and Pi's `codemode` and `tool_search`, which servers with `codemode` and `deferred` exposure are
-reached through. Tools called from `codemode` scripts are checked one by one too, but scripts can also use models, so
-give `codemode` only to those trusted with the rest.
+letters, digits and `_` in the server's name turned into `_`. The others are `websearch`, `webfetch`, `generate_image`,
+`look_at_image`, `locate`, `crop_image` and `schedule`, and Pi's `codemode` and `tool_search`, which servers with
+`codemode` and `deferred` exposure are reached through. Tools called from `codemode` scripts are checked one by one
+too, but scripts can also use models, so give `codemode` only to those trusted with the rest.
 
 The model is shown only the tools the thread may use. Tools taken away in a thread that `allowedUsers` gives back later
 are shown again once its session is reopened, after it idles out or the bot restarts. `codemode` and `tool_search`
@@ -150,6 +183,33 @@ like the built-in tools, which suits small models and small servers best. `codem
 `codemode` exposure, unless `CODEMODE=true`: then scripts can call every tool, `direct` ones and the built-in web tools
 included, to run calls in parallel or cut down large results. The `description` of every enabled server is
 shown to the model, whatever its exposure. `mcp.example.json` is a starting point.
+
+#### Images for MCP servers
+A server's tools can take the thread's images, which the agent gives them by name, as it does `generate_image`, with
+another addition: the server's `images`, naming the arguments its tools take images in, and how each takes them:
+
+* `base64` - the image's data, in base64
+* `dataUrl` - a `data:` URL with it
+* `path` - the path of its file in `DATA_DIR`, for a server started by the bot, or one the directory is shared with
+
+```json
+{
+  "mcpServers": {
+    "barcodes": {
+      "command": "npx",
+      "args": ["-y", "@cordfuse/barcoding-mcp"],
+      "exposure": "direct",
+      "images": { "base64": "base64" }
+    }
+  }
+}
+```
+
+A name of an image in the thread in one of those arguments, at any depth or in a list, such as `"base64":
+"garage.png"`, is replaced with the image before the call reaches the server, and only there: the session keeps the
+name. A name in any other argument stays a name, so a tool that takes a path, a URL or base64 data in arguments of
+their own doesn't get the image where it expects something else, and echo it back in an error. Images are passed on
+whole, up to 20 MB for a posted one, which `base64` and `dataUrl` grow by a third, so a server may refuse large ones.
 
 ### Scheduled jobs
 With `SCHEDULER=true`, the agent gets a `schedule` tool: "remind me at 6 to close the garage", "every morning, check

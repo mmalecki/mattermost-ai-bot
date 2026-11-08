@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after, test } from 'node:test';
 import type { ImageContent } from '@earendil-works/pi-ai';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import type { Agent, ThreadSession } from '../src/agent.ts';
 import { type ModelChoice, parseAllowedUsers, parseModel } from '../src/config.ts';
+import { imageFiles } from '../src/images.ts';
 import type { ScheduledJob } from '../src/scheduler.ts';
 import { type Chat, type IncomingPost, type OutgoingFile, type PostFile, type ThreadPost, Threads } from '../src/threads.ts';
 import type { ImageStore } from '../src/tools.ts';
@@ -83,22 +87,29 @@ interface FakeSession {
   closed: boolean;
 }
 
+const dirs: string[] = [];
+after(() => dirs.forEach((dir) => rmSync(dir, { recursive: true, force: true })));
+
 const MODEL: ModelChoice = { provider: 'local', model: 'default', thinkingLevel: 'off' };
 const TOOLS = ['websearch', 'mcp__parcels__add_observations', 'mcp__parcels__read_graph', 'mcp__home__HassTurnOn'];
 
 /**
  * An agent whose sessions answer each prompt with `answer(prompt)`, fail when it throws, and add no
  * message for `null`. An answer may give its stop reason. Its providers are `anthropic` and `local`,
- * which have every model but `missing`. Closing a session waits for `closing`, when given.
+ * which have every model but `missing`. Closing a session waits for `closing`, when given. Threads'
+ * images are kept in a directory of their own.
  */
-function fakeAgent(answer: Answer, images: boolean, imageEdits: boolean, closing?: () => Promise<void>) {
+function fakeAgent(answer: Answer, images: boolean, imageTools: boolean, closing?: () => Promise<void>) {
   const sessions = new Map<string, FakeSession>();
+  const dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-'));
+  dirs.push(dir);
   const prompted = new Set<string>();
   /** What happened to sessions, in order. */
   const events: string[] = [];
   const agent: Agent = {
-    imageEdits,
+    imageTools,
     hasSession: (rootId) => prompted.has(rootId),
+    images: (rootId) => imageFiles(join(dir, rootId, 'images')),
     pickModel(ref) {
       const choice = parseModel(ref);
       if (!['anthropic', 'local'].includes(choice.provider)) return undefined;
@@ -154,16 +165,16 @@ interface SetupOptions {
   allowlist?: string[] | Record<string, string | string[]> | null;
   /** Whether the model takes images. */
   images?: boolean;
-  /** Whether generate_image takes images. */
-  imageEdits?: boolean;
+  /** Whether some tool takes images. */
+  imageTools?: boolean;
   pickModel?: boolean;
   /** Closing a session waits for this. */
   closing?: () => Promise<void>;
 }
 
-function setup({ answer = () => 'ok', allowlist = ['maciej'], images = true, imageEdits = false, pickModel = false, closing }: SetupOptions = {}) {
+function setup({ answer = () => 'ok', allowlist = ['maciej'], images = true, imageTools = false, pickModel = false, closing }: SetupOptions = {}) {
   const chat = new FakeChat();
-  const { agent, sessions, events } = fakeAgent(answer, images, imageEdits, closing);
+  const { agent, sessions, events } = fakeAgent(answer, images, imageTools, closing);
   const threads = new Threads(agent, chat, { botUserId: BOT, allowedUsers: allowlist ? parseAllowedUsers(allowlist) : undefined, idleMs: 60_000, pickModel });
   return { chat, sessions, events, threads };
 }
@@ -271,7 +282,8 @@ test("large images, and those in other formats, are handed over as the server's 
   ]);
   const session = sessions.get('r1')!;
   assert.deepEqual(session.images[0]!.map((i) => i.mimeType), ['image/jpeg', 'image/jpeg']);
-  assert.match(session.prompts[0]!, /\[image: odd\.heic, not shown: too large, or in a format you can't see\]$/);
+  // Named as they're kept, as JPEG.
+  assert.match(session.prompts[0]!, /: \[image 1: huge\.jpg\]\n\[image 2: scan\.jpg\]\n\[image: odd\.heic, not shown: too large, or in a format you can't see\]$/);
   await threads.close();
 });
 
@@ -585,11 +597,18 @@ test('a thread that idled closes its session before a new post opens it again', 
 const FOX = { type: 'image' as const, mimeType: 'image/png', data: Buffer.from('fox').toString('base64') };
 const OWL = { type: 'image' as const, mimeType: 'image/webp', data: Buffer.from('owl').toString('base64') };
 
+/** Keeps `image` in the thread's store, as generate_image does, and attaches it to the reply. */
+async function generate(session: FakeSession, image: ImageContent): Promise<string> {
+  const name = await session.imageStore!.save('image', image);
+  session.imageStore!.attach(name);
+  return name;
+}
+
 test("images the agent generates are posted with the run's reply, decoded", async () => {
-  const { chat, sessions, threads } = setup({ answer: (prompt) => {
+  const { chat, sessions, threads } = setup({ answer: async (prompt) => {
     if (prompt.includes('thanks')) return 'ok';
-    assert.equal(sessions.get('r1')!.imageStore!.add(FOX), 'image-1.png');
-    assert.equal(sessions.get('r1')!.imageStore!.add(OWL), 'image-2.webp');
+    assert.equal(await generate(sessions.get('r1')!, FOX), 'image.png');
+    assert.equal(await generate(sessions.get('r1')!, OWL), 'image.webp');
     return 'A fox and an owl.';
   } });
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'draw a fox and an owl'), { id: 'r1', direct: true }));
@@ -600,8 +619,8 @@ test("images the agent generates are posted with the run's reply, decoded", asyn
       rootId: 'r1',
       message: 'A fox and an owl.',
       files: [
-        { name: 'image-1.png', mimeType: 'image/png', data: Buffer.from('fox') },
-        { name: 'image-2.webp', mimeType: 'image/webp', data: Buffer.from('owl') },
+        { name: 'image.png', mimeType: 'image/png', data: Buffer.from('fox') },
+        { name: 'image.webp', mimeType: 'image/webp', data: Buffer.from('owl') },
       ],
     },
   ]);
@@ -613,10 +632,10 @@ test("images the agent generates are posted with the run's reply, decoded", asyn
   await threads.close();
 });
 
-test('generated images are posted without text, and with a run that fails, numbered across the thread', async () => {
+test('generated images are posted without text, and with a run that fails, named anew across the thread', async () => {
   let fail = false;
-  const { chat, sessions, threads } = setup({ answer: () => {
-    sessions.get('r1')!.imageStore!.add(FOX);
+  const { chat, sessions, threads } = setup({ answer: async () => {
+    await generate(sessions.get('r1')!, FOX);
     if (fail) throw new Error('rate limited');
     return '';
   } });
@@ -628,13 +647,14 @@ test('generated images are posted without text, and with a run that fails, numbe
   assert.deepEqual(
     chat.replies.map((r) => [r.message, r.files?.map((f) => f.name)]),
     [
-      ['', ['image-1.png']],
+      ['', ['image.png']],
       ["Sorry, I couldn't finish: rate limited", ['image-2.png']],
     ],
   );
   await threads.close();
 });
 
+// A root post's id is its thread's: incoming() gives p0 no root id.
 // A root post's id is its thread's: incoming() gives p0 no root id.
 test('the post that starts a thread picks its model with a trailing /provider/model, taken off it', async () => {
   const { chat, sessions, threads } = setup({ pickModel: true });
@@ -693,33 +713,34 @@ test("a model that can't run is refused, and the next post that brings the bot i
   await threads.close();
 });
 
-test('with generate_image taking images, image lines give their file ids, seen or not', async () => {
-  const { chat, sessions, threads } = setup({ imageEdits: true });
-  chat.files.set('f1', new Uint8Array([1]));
-  const files = [image('f1', 'garage.png'), image('f2', 'odd.heic', { mimeType: 'image/heic', hasPreview: false })];
+test('with some tool taking images, posted ones are kept, and named as kept, seen or not', async () => {
+  const { chat, sessions, threads } = setup({ imageTools: true });
+  chat.files.set('f1', new Uint8Array([1])).set('f2', new Uint8Array([2]));
+  const files = [image('f1', 'image.png'), image('f2', 'image.png'), image('f3', 'odd.heic', { mimeType: 'image/heic', hasPreview: false })];
   threads.handle(incoming('r1', chat.add('r1', 'u1', '', files), { id: 'r1', direct: true }));
   await threads.idle();
-  assert.match(sessions.get('r1')!.prompts[0]!, /: \[image 1: garage\.png, file f1\]\n\[image: odd\.heic, file f2, not shown: too large, or in a format you can't see\]$/);
+  assert.match(sessions.get('r1')!.prompts[0]!, /: \[image 1: image\.png\]\n\[image 2: image-2\.png\]\n\[image: odd\.heic, not shown: too large, or in a format you can't see\]$/);
 
-  const blind = setup({ images: false, imageEdits: true });
+  const blind = setup({ images: false, imageTools: true });
+  blind.chat.files.set('f1', new Uint8Array([1]));
   blind.threads.handle(incoming('r1', blind.chat.add('r1', 'u1', '', [image('f1', 'garage.png')]), { id: 'r1', direct: true }));
   await blind.threads.idle();
-  assert.match(blind.sessions.get('r1')!.prompts[0]!, /: \[image: garage\.png, file f1, which you can't see\]$/);
+  assert.match(blind.sessions.get('r1')!.prompts[0]!, /: \[image: garage\.png, which you can't see\]$/);
   await Promise.all([threads.close(), blind.threads.close()]);
 });
 
-test("generate_image gets the thread's images by file id, and generated ones by name, in this run or a later one", async () => {
+test("tools get the thread's images by name, posted and generated ones, in this run or a later one", async () => {
   let got: unknown[] = [];
   const { chat, sessions, threads } = setup({ answer: async (prompt) => {
-    const store = sessions.get('r1')!.imageStore!;
+    const session = sessions.get('r1')!;
     if (prompt.includes('draw')) {
-      store.add(FOX);
-      got = await store.get(['image-1.png', 'f1', 'f2']);
+      await generate(session, FOX);
+      got = await session.imageStore!.get(['image.png', 'garage.png', 'scan.jpg']);
     } else {
-      got = await store.get(['image-1.png']);
+      got = await session.imageStore!.get(['image.png']);
     }
     return 'ok';
-  }, imageEdits: true });
+  }, imageTools: true });
   chat.files.set('f1', new Uint8Array([1])).set('f2', new Uint8Array([2]));
   const files = [image('f1', 'garage.png'), image('f2', 'scan.tiff', { mimeType: 'image/tiff' })];
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'draw on these', files), { id: 'r1', direct: true }));
@@ -730,71 +751,32 @@ test("generate_image gets the thread's images by file id, and generated ones by 
     // Only the server's preview of a format models don't take.
     { type: 'image', data: 'Ag==', mimeType: 'image/jpeg' },
   ]);
-  assert.deepEqual(chat.downloads.slice(-2), [
-    { fileId: 'f1', preview: false },
-    { fileId: 'f2', preview: true },
-  ]);
 
-  // Once posted, from its post.
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'darker')));
   await threads.idle();
   assert.deepEqual(got, [FOX]);
-  assert.deepEqual(chat.downloads.at(-1), { fileId: 'u1', preview: false });
+  assert.equal(chat.downloads.length, 2);
   await threads.close();
 });
 
-test("generate_image gets nothing from outside the thread, nor a generated image that wasn't posted", async () => {
+test("tools get nothing from outside the thread's images", async () => {
   const errors: string[] = [];
   const { chat, sessions, threads } = setup({ answer: async (prompt) => {
-    const store = sessions.get('r1')!.imageStore!;
-    if (prompt.includes('draw')) store.add(FOX);
-    for (const refs of [['elsewhere'], ['f1'], ['image-1.png']]) {
-      await store.get(refs).then(
+    if (!prompt.includes('draw')) return 'ok';
+    for (const name of ['secret.png', '../../r2/images/secret.png', 'notes.pdf', '.']) {
+      await sessions.get('r1')!.imageStore!.get([name]).then(
         () => errors.push('none'),
         (error: Error) => errors.push(error.message),
       );
     }
     return 'ok';
-  }, imageEdits: true });
-  chat.uploadFails = true;
-  chat.files.set('elsewhere', new Uint8Array([1]));
-  chat.add('r2', 'u1', '', [image('elsewhere', 'secret.png')]);
+  }, imageTools: true });
+  chat.files.set('secret', new Uint8Array([1]));
+  threads.handle(incoming('r2', chat.add('r2', 'u1', '', [image('secret', 'secret.png')]), { id: 'r2', direct: true }));
+  await threads.idle();
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'draw', [{ id: 'f1', name: 'notes.pdf', mimeType: 'application/pdf', size: 10, hasPreview: false }]), { id: 'r1', direct: true }));
   await threads.idle();
-  threads.handle(incoming('r1', chat.add('r1', 'u1', 'again')));
-  await threads.idle();
-  const notInThread = 'is not an image posted in this thread: give the file id from an [image] line, or the name of an image you generated or a tool returned';
-  assert.deepEqual(errors, [
-    `elsewhere ${notInThread}`,
-    `f1 ${notInThread}`,
-    // In its own run, before it was posted.
-    'none',
-    `elsewhere ${notInThread}`,
-    `f1 ${notInThread}`,
-    "image-1.png was never posted, so it can't be used",
-  ]);
-  assert.ok(!chat.downloads.some((d) => d.fileId === 'elsewhere'));
-  await threads.close();
-});
-
-test("generate_image gets fetched images from their tool results in the session, by name", async () => {
-  const fetched = { type: 'image' as const, data: 'ZmV0Y2hlZA==', mimeType: 'image/jpeg' };
-  let got: unknown[] = [];
-  let error = '';
-  const { chat, sessions, threads } = setup({ answer: async () => {
-    const { imageStore, entries } = sessions.get('r1')!;
-    // As pi stores webfetch's result, with the hook's note.
-    entries.push({ type: 'message', message: { role: 'toolResult', toolCallId: 'c1', content: [{ type: 'text', text: 'URL: x' }, FOX, fetched] } });
-    assert.equal(imageStore!.addFetched('c1', 1, 'image/jpeg'), 'fetched-1.jpg');
-    assert.equal(imageStore!.addFetched('c9', 0, 'image/png'), 'fetched-2.png');
-    got = await imageStore!.get(['fetched-1.jpg', 'f1']);
-    await imageStore!.get(['fetched-2.png']).catch((e: Error) => (error = e.message));
-    return 'ok';
-  }, imageEdits: true });
-  chat.files.set('f1', new Uint8Array([1]));
-  threads.handle(incoming('r1', chat.add('r1', 'u1', 'combine', [image('f1', 'garage.png')]), { id: 'r1', direct: true }));
-  await threads.idle();
-  assert.deepEqual(got, [fetched, { type: 'image', data: 'AQ==', mimeType: 'image/png' }]);
-  assert.equal(error, "fetched-2.png is no longer in this thread's history, so it can't be used");
+  const notHere = "is not an image in this thread: give the name on an [image] line, or of an image you generated or a tool returned";
+  assert.deepEqual(errors, ['secret.png', '../../r2/images/secret.png', 'notes.pdf', '.'].map((name) => `${name} ${notHere}`));
   await threads.close();
 });

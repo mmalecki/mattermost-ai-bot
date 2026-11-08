@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
-import { loadConfig, loadTools, parseAllowedUsers, parseImageModel, parseModel } from '../src/config.ts';
+import { loadConfig, loadTools, parseAllowedUsers, parseImageModel, parseModel, parseVisionModel } from '../src/config.ts';
 
 const base = { MATTERMOST_URL: 'http://mm.local/', MATTERMOST_TOKEN: 'mm', MODEL: 'mistral/mistral-small-2603' };
 
@@ -57,11 +57,21 @@ for (const [name, key] of [['SCHEDULER', 'scheduler'], ['CODEMODE', 'codemode'],
   });
 }
 
+test('VISION_MODEL is a provider/model[:thinking], and unset by default', () => {
+  assert.equal(loadConfig(base).visionModel, undefined);
+  assert.deepEqual(loadConfig({ ...base, VISION_MODEL: 'openrouter/google/gemini-3.7-flash:low' }).visionModel, {
+    provider: 'openrouter',
+    model: 'google/gemini-3.7-flash',
+    thinkingLevel: 'low',
+  });
+  assert.throws(() => parseVisionModel('gemini'), /VISION_MODEL must be provider\/model\[:thinking\]/);
+});
+
 test('MCP_CONFIG must exist when set; the default mcp.json may be missing', () => {
   const dir = tempDir();
   const env = { ...base, MCP_CONFIG: join(dir, 'missing.json') };
   assert.throws(() => loadConfig(env), /does not exist/);
-  assert.deepEqual(loadTools(join(dir, 'mcp.json'), false), { allowedUsers: undefined, mcpServers: {} });
+  assert.deepEqual(loadTools(join(dir, 'mcp.json'), false), { allowedUsers: undefined, mcpServers: {}, serverImages: {} });
 });
 
 test("reads pi's mcp.json format with an allowedUsers list, who may use every tool", () => {
@@ -90,6 +100,19 @@ test('allowedUsers can give each user their tools, by name or glob', () => {
   assert.deepEqual(may('mail'), ['websearch', 'web.fetch', 'mcp__parcels__add_observations']);
   assert.deepEqual(may('home'), ['mcp__home__HassTurnOn']);
   assert.deepEqual(may('guest'), []);
+});
+
+test('reads how enabled servers take images', () => {
+  const servers = {
+    barcodes: { command: 'barcoding-mcp', images: { base64: 'base64' } },
+    vision: { url: 'http://vision/mcp', images: { file: 'path', url: 'dataUrl' } },
+    off: { url: 'http://off/mcp', images: { url: 'dataUrl' }, enabled: false },
+    home: { url: 'http://ha/api/mcp' },
+  };
+  assert.deepEqual(loadTools(write({ mcpServers: servers }), true).serverImages, { barcodes: { base64: 'base64' }, vision: { file: 'path', url: 'dataUrl' } });
+  for (const images of ['base64', {}, { image: 'url' }]) {
+    assert.throws(() => loadTools(write({ mcpServers: { x: { command: 'x', images } } }), true), /server "x": "images" must map the arguments that take images to one of base64, dataUrl, path/);
+  }
 });
 
 test('rejects malformed tool configs', () => {

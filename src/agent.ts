@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ImageContent } from '@earendil-works/pi-ai';
@@ -18,20 +18,21 @@ import {
 import { type Config, type ModelChoice, parseModel } from './config.ts';
 import { errorMessage } from './error.ts';
 import { loadScheduler, type ScheduledJob, scheduler } from './scheduler.ts';
-import { type ImageStore, imageGeneration, mcpServers, toolGuard, withoutCwd } from './tools.ts';
+import { type ImageFiles, imageFiles } from './images.ts';
+import { type ImageStore, imageGeneration, mcpImages, mcpNamespace, mcpServers, toolGuard, toolImages, withoutCwd } from './tools.ts';
+import { imageCrop, VISION_TOOLS, vision } from './vision.ts';
 
 // Published as TypeScript, which Node won't strip under node_modules, so pi loads it like any
 // installed pi package.
 const FEATHER_PI_WEB = dirname(fileURLToPath(import.meta.resolve('@mmalecki/feather-pi-web/package.json')));
 
 export interface Agent {
-  /**
-   * Whether generate_image can change images it is given. If so, the model needs the file ids of the
-   * images posted in a thread, to pass them on.
-   */
-  readonly imageEdits: boolean;
+  /** Whether some tool takes images, such as generate_image to change them, so posts' images are kept for it. */
+  readonly imageTools: boolean;
   /** Whether the thread has a session from an earlier run. */
   hasSession(rootId: string): boolean;
+  /** The thread's images, kept in its directory. */
+  images(rootId: string): ImageFiles;
   /**
    * Parses `ref`, written `provider/model[:thinking]`, as a model to run a thread on. Returns
    * undefined when pi knows no such provider, so `ref` is ordinary text rather than a model. Throws
@@ -42,8 +43,8 @@ export interface Agent {
    * Opens the thread's session, creating it on first use. A new session runs on `model`, MODEL's by
    * default; an existing one on the model it was created with. With the scheduler on, `onScheduled`
    * gets the thread's scheduled jobs as they come due; without it, the session can't schedule any.
-   * Likewise, with IMAGE_MODEL set, `imageStore` keeps the images the agent generates, and finds those
-   * it is given.
+   * With some tool taking images, or IMAGE_MODEL set, `imageStore` keeps the images tools make and
+   * return, and finds those they're given.
    */
   openSession(
     rootId: string,
@@ -135,19 +136,21 @@ export async function createAgent(config: Config, botUsername: string): Promise<
     console.log(`Image model: ${provider}/${id}${imageModel.input.includes('image') ? ', edits images' : ''}`);
   }
 
+  const visionModel = config.visionModel && findModel('VISION_MODEL', config.visionModel.provider, config.visionModel.model);
+  if (visionModel) {
+    if (!visionModel.input.includes('image')) throw new Error(`VISION_MODEL ${visionModel.provider}/${visionModel.id} doesn't take images`);
+    console.log(`Vision model: ${visionModel.provider}/${visionModel.id} (thinking ${config.visionModel!.thinkingLevel})`);
+  }
+
   const schedulerExtension = config.scheduler ? await loadScheduler() : undefined;
   if (schedulerExtension) console.log('Scheduler: on');
 
-  const sessionFile = (rootId: string) => join(sessionDir, `${rootId}.jsonl`);
+  /** A thread's directory, which holds its session and its images. */
+  const threadDir = (rootId: string) => join(sessionDir, rootId);
+  const sessionFile = (rootId: string) => join(threadDir(rootId), 'session.jsonl');
   // Threads with a session file, kept here rather than looked up on every post. pi writes the file
   // with the first prompt, so a thread counts from then on.
-  const sessions = new Set(
-    existsSync(sessionDir)
-      ? readdirSync(sessionDir)
-          .filter((name) => name.endsWith('.jsonl'))
-          .map((name) => name.slice(0, -'.jsonl'.length))
-      : [],
-  );
+  const sessions = new Set(existsSync(sessionDir) ? readdirSync(sessionDir).filter((rootId) => existsSync(sessionFile(rootId))) : []);
 
   async function closeSession(session: AgentSession): Promise<void> {
     // As pi's own runtime does: dispose() alone leaves the extensions running.
@@ -160,10 +163,13 @@ export async function createAgent(config: Config, botUsername: string): Promise<
   }
 
   const imageEdits = !!imageModel?.input.includes('image');
+  const { serverImages } = config.tools;
+  const imageTools = imageEdits || !!visionModel || Object.keys(serverImages).length > 0;
 
   return {
-    imageEdits,
+    imageTools,
     hasSession: (rootId) => sessions.has(rootId),
+    images: (rootId) => imageFiles(join(threadDir(rootId), 'images')),
 
     pickModel(ref) {
       let choice;
@@ -181,7 +187,8 @@ export async function createAgent(config: Config, botUsername: string): Promise<
     },
 
     async openSession(rootId, { model: choice, allowTools, onScheduled, imageStore }) {
-      const sessionManager = SessionManager.open(sessionFile(rootId), sessionDir, config.dataDir);
+      mkdirSync(threadDir(rootId), { recursive: true });
+      const sessionManager = SessionManager.open(sessionFile(rootId), threadDir(rootId), config.dataDir);
       const { model, thinkingLevel } = sessionModel(rootId, sessionManager, choice);
       const images = model.input.includes('image');
       const resourceLoader = new DefaultResourceLoader({
@@ -199,6 +206,10 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           toolGuard(allowTools),
           ...(schedulerExtension && onScheduled ? [scheduler(schedulerExtension, onScheduled)] : []),
           ...(imageModel && imageStore ? [imageGeneration(modelRuntime, imageModel, imageStore)] : []),
+          ...(visionModel && imageStore ? [vision(modelRuntime, visionModel, config.visionModel!.thinkingLevel, imageStore, images)] : []),
+          // A model that sees images crops them to look closer, as pi scales them down.
+          ...((images || visionModel) && imageStore ? [imageCrop(imageStore, images)] : []),
+          ...((images || imageTools) && imageStore ? [toolImages(imageStore, ['generate_image', ...VISION_TOOLS]), mcpImages(serverImages, imageStore)] : []),
           withoutCwd(),
         ],
         noExtensions: true,
@@ -213,6 +224,8 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           images,
           imageGeneration: !!imageModel,
           imageEdits,
+          imageServers: Object.fromEntries(Object.entries(serverImages).map(([name, args]) => [name, Object.keys(args)])),
+          vision: !!visionModel,
           serverUrl: config.mattermost.publicUrl,
           rootId,
         }),
@@ -278,6 +291,10 @@ export interface SystemPromptOptions {
   imageGeneration: boolean;
   /** Whether generate_image takes images to change. */
   imageEdits: boolean;
+  /** The MCP servers that take images by name, with the arguments they take them in. */
+  imageServers: Record<string, string[]>;
+  /** Whether VISION_MODEL is set, which gives the agent locate, and look_at_image unless it sees images. */
+  vision: boolean;
   /** Where people open the server, for links. */
   serverUrl: string;
   /** The thread's root post, so its link can be given. */
@@ -285,7 +302,8 @@ export interface SystemPromptOptions {
 }
 
 export function buildSystemPrompt(options: SystemPromptOptions): string {
-  const { botUsername, servers, scheduler, images, imageGeneration, imageEdits, serverUrl, rootId } = options;
+  const { botUsername, servers, scheduler, images, imageGeneration, imageEdits, imageServers, vision, serverUrl, rootId } = options;
+  const imageArguments = Object.entries(imageServers).map(([name, args]) => `${mcpNamespace(name)} in ${args.join(' or ')}`);
   return [
     `You are @${botUsername}, a Mattermost bot that gets things done with your tools.`,
     'Each user message holds one or more Mattermost posts from a thread, as "@username (time, post <id>): text". Several people can take part in one thread.',
@@ -309,7 +327,19 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
       : []),
     ...(imageGeneration && imageEdits
       ? [
-          'To change an image, or make one from it, pass it to generate_image in images: one posted in the thread by the "file <id>" on its line, one you generated or a tool returned by its name. Say what to change in the prompt.',
+          'To change an image, or make one from it, pass its name to generate_image in images: one posted in the thread by the name on its [image] line, one you generated or a tool returned by the name it was saved as. Say what to change in the prompt.',
+        ]
+      : []),
+    ...(vision && !images ? ['To learn what is in images in this thread, ask look_at_image, by their names.'] : []),
+    // crop_image, which the agent has when it sees images, or has VISION_MODEL's tools.
+    ...(images || vision
+      ? [
+          `To ${images ? 'look closer at' : 'work on'} a part of an image, such as a barcode, a label or small text, ${vision ? 'find it with locate, and ' : ''}cut it out with crop_image, by the image's name${images ? '' : ': the new image can go to look_at_image, or to any tool that takes images'}.`,
+        ]
+      : []),
+    ...(imageArguments.length
+      ? [
+          `These tools take images by name, in these arguments: ${imageArguments.join('; ')}. Give the name of an image in this thread there, from its [image] line or the name it was saved as, never in another argument, and the image is passed on as the tool takes it.`,
         ]
       : []),
     ...directServers(servers),
@@ -333,9 +363,4 @@ export function directServers(servers: Record<string, McpServerConfig>): string[
  */
 export function permalink(serverUrl: string, postId: string): string {
   return `${serverUrl}/_redirect/pl/${postId}`;
-}
-
-/** Tool names are `mcp__<server>__<tool>`, with `-` in the server name replaced by `_`. */
-function mcpNamespace(server: string): string {
-  return `mcp__${server.replace(/[^A-Za-z0-9_]/g, '_')}`;
 }

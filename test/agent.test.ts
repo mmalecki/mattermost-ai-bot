@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -22,7 +22,7 @@ test("lists what directly exposed servers offer, in the format of pi's mcp_serve
   assert.deepEqual(directServers({}), []);
 });
 
-const promptOptions = { botUsername: 'sailor', servers: {}, scheduler: false, images: false, imageGeneration: false, imageEdits: false, serverUrl: 'https://chat.example', rootId: 'r1' };
+const promptOptions = { botUsername: 'sailor', servers: {}, scheduler: false, images: false, imageGeneration: false, imageEdits: false, imageServers: {}, vision: false, serverUrl: 'https://chat.example', rootId: 'r1' };
 
 test('links posts without their team, and gives the model the thread\'s link', () => {
   assert.equal(permalink('https://chat.example', 'p1'), 'https://chat.example/_redirect/pl/p1');
@@ -40,8 +40,29 @@ test('tells the model its generated images are attached only when it can generat
 });
 
 test('tells the model how to give generate_image images only when it takes them', () => {
-  assert.match(buildSystemPrompt({ ...promptOptions, imageGeneration: true, imageEdits: true }), /pass it to generate_image in images/);
+  assert.match(buildSystemPrompt({ ...promptOptions, imageGeneration: true, imageEdits: true }), /pass its name to generate_image in images/);
   assert.doesNotMatch(buildSystemPrompt({ ...promptOptions, imageGeneration: true }), /pass it to generate_image/);
+});
+
+test('tells the model about the vision tools it has: look_at_image only when it is blind, crop_image when it sees images', () => {
+  const blind = buildSystemPrompt({ ...promptOptions, vision: true });
+  assert.match(blind, /ask look_at_image/);
+  assert.match(blind, /To work on a part of an image, .* find it with locate, and cut it out with crop_image, by the image's name: the new image can go to look_at_image/);
+
+  const seeing = buildSystemPrompt({ ...promptOptions, images: true, vision: true });
+  assert.doesNotMatch(seeing, /look_at_image/);
+  assert.match(seeing, /To look closer at a part of an image, .* find it with locate, and cut it out with crop_image, by the image's name\./);
+  assert.match(buildSystemPrompt({ ...promptOptions, images: true }), /To look closer at a part of an image, such as a barcode, a label or small text, cut it out with crop_image/);
+
+  assert.doesNotMatch(buildSystemPrompt(promptOptions), /look_at_image|locate|crop_image/);
+});
+
+test('tells the model which servers take images by name', () => {
+  assert.match(
+    buildSystemPrompt({ ...promptOptions, imageServers: { 'bar-codes': ['base64'], vision: ['image', 'url'] } }),
+    /take images by name, in these arguments: mcp__bar_codes in base64; mcp__vision in image or url\./,
+  );
+  assert.doesNotMatch(buildSystemPrompt(promptOptions), /take images by name/);
 });
 
 /** An agent on `local/small`, from a models.json that also has `local/large`, which takes images. */
@@ -73,8 +94,11 @@ async function fakeLlm() {
   return { url: `http://127.0.0.1:${port}/v1`, models, tools, close: () => server.close() };
 }
 
-/** An agent in `dir` on `local/small`, from a models.json that also has `local/large`, which takes images. */
-async function localAgent(baseUrl = 'http://127.0.0.1:1/v1', dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-'))) {
+/**
+ * An agent in `dir` on `local/small`, from a models.json that also has `local/large`, which takes images,
+ * with `env` added to its environment.
+ */
+async function localAgent({ baseUrl = 'http://127.0.0.1:1/v1', dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-')), env: extraEnv = {} }: { baseUrl?: string; dir?: string; env?: Record<string, string> } = {}) {
   dirs.push(dir);
   const models = [
     { id: 'small', contextWindow: 8192, reasoning: true },
@@ -82,7 +106,7 @@ async function localAgent(baseUrl = 'http://127.0.0.1:1/v1', dir = mkdtempSync(j
   ];
   writeFileSync(join(dir, 'models.json'), JSON.stringify({ providers: { local: { baseUrl, api: 'openai-completions', apiKey: 'none', models } } }));
   writeFileSync(join(dir, 'mcp.json'), '{}');
-  const env = { MATTERMOST_URL: 'http://mm.local', MATTERMOST_TOKEN: 'mm', MODEL: 'local/small', MCP_CONFIG: join(dir, 'mcp.json'), DATA_DIR: dir };
+  const env = { MATTERMOST_URL: 'http://mm.local', MATTERMOST_TOKEN: 'mm', MODEL: 'local/small', MCP_CONFIG: join(dir, 'mcp.json'), DATA_DIR: dir, ...extraEnv };
   return { agent: await createAgent(loadConfig(env), 'sailor'), dir };
 }
 
@@ -97,7 +121,7 @@ test('picks models pi knows, and only names providers it knows as models', async
 test('a session runs on the model it was created with, MODEL by default', async (t) => {
   const llm = await fakeLlm();
   t.after(llm.close);
-  const { agent, dir } = await localAgent(llm.url);
+  const { agent, dir } = await localAgent({ baseUrl: llm.url });
   const options = { allowTools: () => false };
   const large = { provider: 'local', model: 'large', thinkingLevel: 'high' } as const;
 
@@ -107,6 +131,8 @@ test('a session runs on the model it was created with, MODEL by default', async 
   assert.equal(agent.hasSession('r1'), false);
   await session.prompt('hi');
   assert.equal(agent.hasSession('r1'), true);
+  // In the thread's own directory.
+  assert.ok(existsSync(join(dir, 'sessions', 'r1', 'session.jsonl')));
   const answer = session.messages.at(-1) as AssistantMessage;
   assert.deepEqual([answer.role, answer.content], ['assistant', [{ type: 'text', text: 'hello' }]]);
   await session.close();
@@ -121,14 +147,14 @@ test('a session runs on the model it was created with, MODEL by default', async 
   assert.deepEqual(llm.models, ['large']);
 
   // A restarted bot finds the threads that have sessions on disk.
-  const { agent: restarted } = await localAgent(llm.url, dir);
+  const { agent: restarted } = await localAgent({ baseUrl: llm.url, dir });
   assert.deepEqual([restarted.hasSession('r1'), restarted.hasSession('r2')], [true, false]);
 });
 
 test('the model is declared only the tools the thread may use, which stay away until the session is reopened', async (t) => {
   const llm = await fakeLlm();
   t.after(llm.close);
-  const { agent } = await localAgent(llm.url);
+  const { agent } = await localAgent({ baseUrl: llm.url });
   let allowed = (_name: string) => true;
   const session = await agent.openSession('r1', { allowTools: (name) => allowed(name) });
   await session.prompt('hi');
@@ -151,4 +177,40 @@ test('the model is declared only the tools the thread may use, which stay away u
   await reopened.prompt('and now?');
   assert.deepEqual(llm.tools[4], llm.tools[1]);
   await reopened.close();
+});
+
+test('VISION_MODEL gives sessions the vision tools, and must take images', async (t) => {
+  await assert.rejects(localAgent({ env: { VISION_MODEL: 'local/small' } }), /VISION_MODEL local\/small doesn't take images/);
+  await assert.rejects(localAgent({ env: { VISION_MODEL: 'local/huge' } }), /VISION_MODEL local\/huge is neither in pi's catalog/);
+
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent } = await localAgent({ baseUrl: llm.url, env: { VISION_MODEL: 'local/large:low' } });
+  assert.equal(agent.imageTools, true);
+  const imageStore = { ...agent.images('r1'), attach: () => {} };
+  const session = await agent.openSession('r1', { allowTools: () => true, imageStore });
+  await session.prompt('hi');
+  for (const tool of ['look_at_image', 'locate', 'crop_image']) assert.ok(llm.tools[0]!.includes(tool), tool);
+  await session.close();
+
+  // A model that sees images looks at them itself.
+  const seeing = await agent.openSession('r2', { model: { provider: 'local', model: 'large', thinkingLevel: 'off' }, allowTools: () => true, imageStore });
+  await seeing.prompt('hi');
+  assert.deepEqual(['look_at_image', 'locate', 'crop_image'].map((tool) => llm.tools[1]!.includes(tool)), [false, true, true]);
+  await seeing.close();
+
+  assert.equal((await localAgent()).agent.imageTools, false);
+});
+
+test('a model that sees images can crop them without VISION_MODEL', async (t) => {
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent } = await localAgent({ baseUrl: llm.url });
+  const imageStore = { ...agent.images('r1'), attach: () => {} };
+  for (const model of ['large', 'small']) {
+    const session = await agent.openSession(model, { model: { provider: 'local', model, thinkingLevel: 'off' }, allowTools: () => true, imageStore });
+    await session.prompt('hi');
+    await session.close();
+  }
+  assert.deepEqual(llm.tools.map((tools) => ['look_at_image', 'locate', 'crop_image'].filter((tool) => tools.includes(tool))), [['crop_image'], []]);
 });

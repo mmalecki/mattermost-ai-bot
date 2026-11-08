@@ -19,6 +19,8 @@ export interface Config {
   };
   /** The model the agent generates images with, from pi's catalog or `modelsPath`. Unset: no images. */
   imageModel: { provider: string; model: string } | undefined;
+  /** The chat model the agent's vision tools look at images with, which must take them. Unset: no vision tools. */
+  visionModel: ModelChoice | undefined;
   tools: ToolsConfig;
   /** Whether the agent can schedule jobs in its threads, with pi-ate-scheduler. */
   scheduler: boolean;
@@ -37,10 +39,21 @@ export interface ToolsConfig {
   allowedUsers: AllowedUsers | undefined;
   /** MCP servers in pi's `mcp.json` format, validated by pi when registered. */
   mcpServers: Record<string, McpServerConfig>;
+  /**
+   * The arguments the enabled servers with an `images` setting take images in, which the agent gives them
+   * by name, and how each takes them.
+   */
+  serverImages: Record<string, ImageArguments>;
 }
 
 /** Usernames, and for each, whether they may have the agent call a tool, by its name. */
 export type AllowedUsers = Map<string, (toolName: string) => boolean>;
+
+/** How a server's tools take an image: its base64 data, as a `data:` URL, or the path of its file. */
+export type ImageForm = 'base64' | 'dataUrl' | 'path';
+/** A server's arguments that take images, by name, at any depth, and how each takes them. */
+export type ImageArguments = Record<string, ImageForm>;
+const IMAGE_FORMS: readonly string[] = ['base64', 'dataUrl', 'path'] satisfies ImageForm[];
 
 /** A model a thread can run on, as MODEL names one. */
 export type ModelChoice = Pick<Config['llm'], 'provider' | 'model' | 'thinkingLevel'>;
@@ -77,6 +90,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       modelsPath: join(dirname(mcpConfig), 'models.json'),
     },
     imageModel: env.IMAGE_MODEL?.trim() ? parseImageModel(env.IMAGE_MODEL.trim()) : undefined,
+    visionModel: env.VISION_MODEL?.trim() ? parseVisionModel(env.VISION_MODEL.trim()) : undefined,
     // A missing default file means no MCP servers; a missing file that was asked for is an error.
     tools: loadTools(mcpConfig, !!env.MCP_CONFIG),
     scheduler: flag('SCHEDULER'),
@@ -119,14 +133,24 @@ export function parseImageModel(ref: string): NonNullable<Config['imageModel']> 
   return { provider: parsed.provider, model: parsed.model };
 }
 
+/** `provider/model[:thinking]`, as MODEL takes it. */
+export function parseVisionModel(ref: string): ModelChoice {
+  try {
+    return parseModel(ref);
+  } catch {
+    throw new Error(`VISION_MODEL must be provider/model[:thinking], such as openrouter/qwen/qwen3-vl-235b-a22b-instruct, not "${ref}"`);
+  }
+}
+
 /**
  * Reads pi's `mcp.json` format, plus a top-level `allowedUsers` that gates every tool call: a list of
- * usernames who may use every tool, or an object giving each username the tools they may use.
+ * usernames who may use every tool, or an object giving each username the tools they may use. And an
+ * `images` setting on a server, which pi ignores.
  */
 export function loadTools(path: string, required: boolean): ToolsConfig {
   if (!existsSync(path)) {
     if (required) throw new Error(`${path} does not exist`);
-    return { allowedUsers: undefined, mcpServers: {} };
+    return { allowedUsers: undefined, mcpServers: {}, serverImages: {} };
   }
   let parsed: unknown;
   try {
@@ -143,7 +167,17 @@ export function loadTools(path: string, required: boolean): ToolsConfig {
   } catch (error) {
     throw new Error(`${path}: ${errorMessage(error)}`);
   }
-  return { allowedUsers, mcpServers: (parsed.mcpServers ?? {}) as Record<string, McpServerConfig> };
+  const mcpServers = (parsed.mcpServers ?? {}) as Record<string, McpServerConfig & { images?: unknown }>;
+  const serverImages: Record<string, ImageArguments> = {};
+  for (const [name, server] of Object.entries(mcpServers)) {
+    if (!isRecord(server) || server.images === undefined) continue;
+    const { images } = server;
+    if (!isRecord(images) || !Object.keys(images).length || !Object.values(images).every((form) => IMAGE_FORMS.includes(form as string))) {
+      throw new Error(`${path}: server "${name}": "images" must map the arguments that take images to one of ${IMAGE_FORMS.join(', ')}`);
+    }
+    if (server.enabled !== false) serverImages[name] = images as ImageArguments;
+  }
+  return { allowedUsers, mcpServers, serverImages };
 }
 
 /**
