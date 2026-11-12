@@ -3,7 +3,7 @@ import { type TestContext, test } from 'node:test';
 import type { WebSocketMessage } from '@mattermost/client';
 import type { Post } from '@mattermost/types/posts';
 import { type Client, incomingPost, Mattermost, mentions, replyPosts, type Socket, splitMessage, updatedUser } from '../src/mattermost.ts';
-import type { IncomingPost } from '../src/threads.ts';
+import type { IncomingPost } from '../src/chat.ts';
 
 function posted(post: object, data: object = {}): WebSocketMessage {
   return {

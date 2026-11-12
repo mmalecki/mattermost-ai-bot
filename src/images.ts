@@ -1,7 +1,7 @@
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import type { ImageContent } from '@earendil-works/pi-ai';
-import type { Chat, OutgoingFile, PostFile } from './threads.ts';
+import type { Chat, OutgoingFile, PostFile } from './chat.ts';
 
 /** The image formats models take, with the file extension each is kept under. */
 const IMAGE_EXTENSIONS: Record<string, string> = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };

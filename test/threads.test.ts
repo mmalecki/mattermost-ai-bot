@@ -9,7 +9,8 @@ import type { Agent, ThreadSession } from '../src/agent.ts';
 import { type ModelChoice, parseAllowedUsers, parseModel } from '../src/config.ts';
 import { type ImageStore, imageFiles, ThreadImages } from '../src/images.ts';
 import type { ScheduledJob } from '../src/scheduler.ts';
-import { type Chat, type IncomingPost, type OutgoingFile, type PostFile, type ThreadPost, Threads } from '../src/threads.ts';
+import type { Chat, IncomingPost, OutgoingFile, PostFile, ThreadPost } from '../src/chat.ts';
+import { Threads } from '../src/threads.ts';
 
 const BOT = 'bot';
 const USERS: Record<string, string> = { u1: 'maciej', u2: 'guest', u3: 'carol' };

@@ -2,7 +2,7 @@ import { Client4, WebSocketClient, type WebSocketMessage, type WebSocketMessages
 import type { FileInfo } from '@mattermost/types/files';
 import type { Post } from '@mattermost/types/posts';
 import { errorMessage } from './error.ts';
-import type { Chat, IncomingPost, OutgoingFile, PostFile, ThreadPost } from './threads.ts';
+import type { Chat, IncomingPost, OutgoingFile, PostFile, ThreadPost } from './chat.ts';
 
 /** Mattermost's default MaxPostSize is 16383 characters; leave room for continuation. */
 const MAX_POST_CHARS = 16_000;
