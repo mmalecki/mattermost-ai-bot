@@ -96,7 +96,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       modelsPath: join(dirname(mcpConfig), 'models.json'),
     },
     imageModel: imageModel ? parseImageModel(imageModel) : undefined,
-    visionModel: visionModel ? parseModel(visionModel, 'VISION_MODEL', 'openrouter/qwen/qwen3-vl-235b-a22b-instruct') : undefined,
+    visionModel: visionModel ? parseModel(visionModel, { name: 'VISION_MODEL', example: 'openrouter/qwen/qwen3-vl-235b-a22b-instruct' }) : undefined,
     // A missing default file means no MCP servers; a missing file that was asked for is an error.
     tools: loadTools(mcpConfig, !!env.MCP_CONFIG),
     scheduler: flag('SCHEDULER'),
@@ -112,11 +112,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 /**
  * `provider/model[:thinking]`, as pi's `--model` takes it. The model may contain `/` itself, as
  * OpenRouter's do, and `:` too, so only a known thinking level after the last `:` counts as one. An
- * error names the variable `name`, and gives `example`.
+ * error names the variable `name`, and gives `example`, and the thinking level only if it takes one.
  */
-export function parseModel(ref: string, name = 'MODEL', example = 'mistral/mistral-small-2603'): ModelChoice {
+export function parseModel(ref: string, { name = 'MODEL', example = 'mistral/mistral-small-2603', thinking = true } = {}): ModelChoice {
   const slash = ref.indexOf('/');
-  if (slash <= 0 || slash === ref.length - 1) throw new Error(`${name} must be provider/model, such as ${example}, not "${ref}"`);
+  if (slash <= 0 || slash === ref.length - 1) {
+    throw new Error(`${name} must be provider/model${thinking ? '[:thinking]' : ''}, such as ${example}, not "${ref}"`);
+  }
   const provider = ref.slice(0, slash);
   let model = ref.slice(slash + 1);
   let thinkingLevel: ThinkingLevel = 'off';
@@ -131,7 +133,7 @@ export function parseModel(ref: string, name = 'MODEL', example = 'mistral/mistr
 
 /** `provider/model`, as MODEL takes it, without a thinking level: image models don't think. */
 export function parseImageModel(ref: string): NonNullable<Config['imageModel']> {
-  const { provider, model, thinkingLevel } = parseModel(ref, 'IMAGE_MODEL', 'openrouter/bytedance-seed/seedream-5-0-pro');
+  const { provider, model, thinkingLevel } = parseModel(ref, { name: 'IMAGE_MODEL', example: 'openrouter/bytedance-seed/seedream-5-0-pro', thinking: false });
   if (thinkingLevel !== 'off') throw new Error(`IMAGE_MODEL takes no thinking level, as in "${ref}"`);
   return { provider, model };
 }
