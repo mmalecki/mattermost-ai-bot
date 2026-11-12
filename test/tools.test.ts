@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { AssistantImages, ImageApi, ImageContent, ImageModel } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import type { ImageStore } from '../src/images.ts';
-import { imageGeneration, mcpImages, mcpServers, stripCwd, toolGuard, toolImages } from '../src/tools.ts';
+import { imageGeneration, mcpImages, mcpServers, toolGuard, toolImages } from '../src/tools.ts';
 
 const blocked = (toolName: string) => ({ block: true, reason: `${toolName} is off in this thread: someone who has posted in it is not allowed to use it.` });
 
@@ -61,12 +61,6 @@ test('takes the tools that are not allowed off the declared ones, before each ru
   allowed = (name) => name === 'websearch';
   emit('turn_start');
   assert.deepEqual(pi.active, ['websearch']);
-});
-
-test("drops only pi's cwd section from the system prompt", () => {
-  const prompt = 'You are a bot.\n\n<mcp_servers>\n- docs: search\n</mcp_servers>\n\n<cwd>\n/srv/bot/data\n</cwd>';
-  assert.equal(stripCwd(prompt), 'You are a bot.\n\n<mcp_servers>\n- docs: search\n</mcp_servers>');
-  assert.equal(stripCwd('You are a bot.'), 'You are a bot.');
 });
 
 test('tells the guard which tool is called', () => {

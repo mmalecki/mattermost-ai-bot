@@ -25,29 +25,6 @@ export function mcpServers(servers: Record<string, McpServerConfig>): ExtensionF
 }
 
 /**
- * Writes the system prompt for the tools the thread has. Before each run, `prompt` is given the tools
- * that are registered and `allowed`, so the prompt tells the model only how to use those, and it
- * replaces the prompt pi was given. Also drops the `<cwd>` section pi adds to every system prompt: the
- * bot has no file access, and a working directory invites the model to answer as if it were inside a
- * software project. Register it last: after the MCP extension, which registers direct servers' tools
- * before its own handler returns, and after the other extensions, so their sections are already in the
- * prompt it edits.
- */
-export function threadPrompt(allowed: (toolName: string) => boolean, prompt: (tools: ReadonlySet<string>) => string): ExtensionFactory {
-  return (pi) => {
-    pi.on('before_agent_start', (event) => {
-      // Set on the options rather than returned alone, so the sections pi records match what is sent.
-      event.systemPromptOptions.customPrompt = prompt(new Set(pi.getAllTools().map((tool) => tool.name).filter(allowed)));
-      return { systemPrompt: stripCwd(event.systemPrompt) };
-    });
-  };
-}
-
-export function stripCwd(systemPrompt: string): string {
-  return systemPrompt.replace(/\n*<cwd>\n[\s\S]*?\n<\/cwd>/, '');
-}
-
-/**
  * Keeps the model to the tools everyone in the thread may use. Before each run and turn, tools that
  * aren't allowed are taken off the ones declared to the model, which also keeps codemode scripts from
  * calling `direct` ones. A thread's tools only shrink while its session is open, so this only takes
