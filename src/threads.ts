@@ -110,7 +110,11 @@ class Thread {
   #pending = false;
   /** Scheduled jobs that came due, run after any new posts. */
   readonly #jobs: ScheduledJob[] = [];
-  /** Whether the current run may call a tool, by its name. */
+  /**
+   * Whether the current run may call a tool, by its name. The session's tool guard asks it through
+   * #open's allowTools, and it is set anew before each run. That's safe only because a thread's runs
+   * never overlap: were a scheduled job to run during a post's run, each would get the other's tools.
+   */
   #allowed: (toolName: string) => boolean = () => false;
   #idleTimer: NodeJS.Timeout | undefined;
   #closed = false;
