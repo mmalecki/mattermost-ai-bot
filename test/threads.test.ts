@@ -587,8 +587,8 @@ const OWL = { type: 'image' as const, mimeType: 'image/webp', data: Buffer.from(
 
 /** Keeps `image` in the thread's store, as generate_image does, and attaches it to the reply. */
 async function generate(session: FakeSession, image: ImageContent): Promise<string> {
-  const name = await session.imageStore!.save('image', image);
-  session.imageStore!.attach(name);
+  const name = await session.imageStore.save('image', image);
+  session.imageStore.attach(name);
   return name;
 }
 
@@ -723,9 +723,9 @@ test("tools get the thread's images by name, posted and generated ones, in this 
     const session = sessions.get('r1')!;
     if (prompt.includes('draw')) {
       await generate(session, FOX);
-      got = await session.imageStore!.get(['image.png', 'garage.png', 'scan.jpg']);
+      got = await session.imageStore.get(['image.png', 'garage.png', 'scan.jpg']);
     } else {
-      got = await session.imageStore!.get(['image.png']);
+      got = await session.imageStore.get(['image.png']);
     }
     return 'ok';
   }, imageTools: true });
@@ -752,7 +752,7 @@ test("tools get nothing from outside the thread's images", async () => {
   const { chat, sessions, threads } = setup({ answer: async (prompt) => {
     if (!prompt.includes('draw')) return 'ok';
     for (const name of ['secret.png', '../../r2/images/secret.png', 'notes.pdf', '.']) {
-      await sessions.get('r1')!.imageStore!.get([name]).then(
+      await sessions.get('r1')!.imageStore.get([name]).then(
         () => errors.push('none'),
         (error: Error) => errors.push(error.message),
       );
