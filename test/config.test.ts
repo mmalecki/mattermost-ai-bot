@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
-import { loadConfig, loadTools, parseAllowedUsers, parseImageModel, parseModel, parseVisionModel } from '../src/config.ts';
+import { loadConfig, loadTools, parseAllowedUsers, parseImageModel, parseModel } from '../src/config.ts';
 
 const base = { MATTERMOST_URL: 'http://mm.local/', MATTERMOST_TOKEN: 'mm', MODEL: 'mistral/mistral-small-2603' };
 
@@ -37,7 +37,7 @@ test('IMAGE_MODEL is a provider/model without a thinking level, and unset by def
     provider: 'openrouter',
     model: 'google/gemini-2.5-flash-image',
   });
-  assert.throws(() => parseImageModel('flux'), /IMAGE_MODEL must be provider\/model/);
+  assert.throws(() => parseImageModel('flux'), /IMAGE_MODEL must be provider\/model, such as openrouter\/bytedance-seed\/seedream-5-0-pro, not "flux"/);
   assert.throws(() => parseImageModel('openrouter/google/gemini-2.5-flash-image:high'), /IMAGE_MODEL takes no thinking level/);
 });
 
@@ -64,7 +64,7 @@ test('VISION_MODEL is a provider/model[:thinking], and unset by default', () => 
     model: 'google/gemini-3.7-flash',
     thinkingLevel: 'low',
   });
-  assert.throws(() => parseVisionModel('gemini'), /VISION_MODEL must be provider\/model\[:thinking\]/);
+  assert.throws(() => loadConfig({ ...base, VISION_MODEL: 'gemini' }), /VISION_MODEL must be provider\/model, such as openrouter\/qwen\/qwen3-vl-235b-a22b-instruct, not "gemini"/);
 });
 
 test('MCP_CONFIG must exist when set; the default mcp.json may be missing', () => {
