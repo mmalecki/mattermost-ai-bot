@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -49,14 +49,19 @@ async function fakeLlm() {
  * An agent in `dir` on `local/small`, from a models.json that also has `local/large`, which takes images,
  * with `env` added to its environment.
  */
-async function localAgent({ baseUrl = 'http://127.0.0.1:1/v1', dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-')), env: extraEnv = {} }: { baseUrl?: string; dir?: string; env?: Record<string, string> } = {}) {
+async function localAgent({
+  baseUrl = 'http://127.0.0.1:1/v1',
+  dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-')),
+  env: extraEnv = {},
+  mcp = {},
+}: { baseUrl?: string; dir?: string; env?: Record<string, string>; mcp?: object } = {}) {
   dirs.push(dir);
   const models = [
     { id: 'small', contextWindow: 8192, reasoning: true },
     { id: 'large', contextWindow: 8192, reasoning: true, input: ['text', 'image'] },
   ];
   writeFileSync(join(dir, 'models.json'), JSON.stringify({ providers: { local: { baseUrl, api: 'openai-completions', apiKey: 'none', models } } }));
-  writeFileSync(join(dir, 'mcp.json'), '{}');
+  writeFileSync(join(dir, 'mcp.json'), JSON.stringify(mcp));
   const env = { MATTERMOST_URL: 'http://mm.local', MATTERMOST_TOKEN: 'mm', MODEL: 'local/small', MCP_CONFIG: join(dir, 'mcp.json'), DATA_DIR: dir, ...extraEnv };
   return { agent: await createAgent(loadConfig(env), 'sailor'), dir };
 }
@@ -204,4 +209,46 @@ test('a model that sees images can crop them without VISION_MODEL', async (t) =>
     await session.close();
   }
   assert.deepEqual(llm.tools.map((tools) => ['look_at_image', 'locate', 'crop_image'].filter((tool) => tools.includes(tool))), [['crop_image'], []]);
+});
+
+/**
+ * A stdio MCP server without tools, run as `node <file> <dir>`, which writes its pid to `<dir>/started`
+ * once it's connected, and `<dir>/stopped` when it's shut down.
+ */
+const PROBE_SERVER = `
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { createInterface } from 'node:readline';
+const dir = process.argv[2];
+const send = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\\n');
+createInterface({ input: process.stdin }).on('line', (line) => {
+  const { id, method, params } = JSON.parse(line);
+  if (method === 'initialize') send(id, { protocolVersion: params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'probe', version: '1' } });
+  else if (method === 'notifications/initialized') writeFileSync(join(dir, 'started'), String(process.pid));
+  else if (id !== undefined) send(id, method === 'tools/list' ? { tools: [] } : {});
+});
+const stop = () => { writeFileSync(join(dir, 'stopped'), ''); process.exit(0); };
+process.stdin.on('end', stop);
+process.on('SIGTERM', stop);
+`;
+
+/** Resolves once `done()` is true, checking every 20 ms for up to 10 seconds. */
+async function until(done: () => boolean): Promise<void> {
+  for (const started = Date.now(); !done(); await new Promise((resolve) => setTimeout(resolve, 20))) {
+    if (Date.now() - started > 10_000) throw new Error('timed out');
+  }
+}
+
+test("closing a session shuts its extensions down, which closes its MCP servers' connections", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-'));
+  writeFileSync(join(dir, 'probe.mjs'), PROBE_SERVER);
+  const probe = { command: process.execPath, args: [join(dir, 'probe.mjs'), dir], exposure: 'direct' };
+  const { agent } = await localAgent({ dir, mcp: { mcpServers: { probe } } });
+  const session = await open(agent, 'r1');
+  await until(() => existsSync(join(dir, 'started')));
+  t.after(() => {
+    if (!existsSync(join(dir, 'stopped'))) process.kill(Number(readFileSync(join(dir, 'started'), 'utf8')));
+  });
+  await session.close();
+  await until(() => existsSync(join(dir, 'stopped')));
 });
