@@ -46,7 +46,8 @@ test('gets only images kept in the directory, by the names they were kept under'
   await files.save('garage.png', PNG);
   writeFileSync(join(dir, 'notes.txt'), 'hi');
   assert.equal(await files.path('garage.png'), join(dir, 'garage.png'));
-  for (const name of ['nope.png', 'notes.txt', '../images/garage.png', '.', '']) {
+  // As well as image data given in place of a name, which MCP servers' image arguments may hold.
+  for (const name of ['nope.png', 'notes.txt', '../images/garage.png', '.', '', 'iVBORw0KGgo/AAA+.png', 'data:image/png;base64,cG5n']) {
     await assert.rejects(files.get([name]), { message: `${name} is not an image in this thread: give the name on an [image] line, or of an image you generated or a tool returned` });
   }
 });

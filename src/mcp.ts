@@ -38,9 +38,6 @@ export function mcpImages(servers: Record<string, ImageArguments>, store: ImageF
   };
 }
 
-/** Might name an image: a file name, without directories, with an image's extension. */
-const IMAGE_NAME = /^[^/\\]+\.(?:png|jpe?g|webp|gif)$/i;
-
 /** Replaces the names of images in `store` in `value`'s image arguments, `args`, with the images, in place. */
 async function replaceImages(value: unknown, args: ImageArguments, store: ImageFiles, form?: ImageForm): Promise<void> {
   if (typeof value !== 'object' || value === null) return;
@@ -50,8 +47,9 @@ async function replaceImages(value: unknown, args: ImageArguments, store: ImageF
       // An image argument, or a list in one.
       const itemForm = typeof key === 'string' && Object.hasOwn(args, key) ? args[key] : form;
       if (typeof item !== 'string') return replaceImages(item, args, store, itemForm);
-      if (!itemForm || !IMAGE_NAME.test(item)) return;
-      // A name of something the thread doesn't have is left as it is.
+      if (!itemForm) return;
+      // Anything but the name of one of the thread's images is left as it is, such as data already
+      // given: the store refuses it, without looking for a file unless it could be an image's name.
       const image = await imageIn(store, item, itemForm).catch(() => undefined);
       if (image !== undefined) (value as Record<string | number, unknown>)[key] = image;
     }),
