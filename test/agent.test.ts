@@ -220,6 +220,14 @@ test("the system prompt tells the model only about the tools the thread may use,
   assert.match(llm.prompts[1]!, /You are @sailor/);
   assert.doesNotMatch(llm.prompts[1]!, /crop_image|<cwd>/);
   await session.close();
+
+  // A thread that never had the tool isn't told of it from its first request.
+  const restricted = await agent.openSession('r2', { model: { provider: 'local', model: 'large', thinkingLevel: 'off' }, allowTools: (name) => name !== 'crop_image', imageStore });
+  await restricted.prompt('hi');
+  assert.ok(!llm.tools[2]!.includes('crop_image'));
+  assert.match(llm.prompts[2]!, /You are @sailor/);
+  assert.doesNotMatch(llm.prompts[2]!, /crop_image/);
+  await restricted.close();
 });
 
 test('VISION_MODEL gives sessions the vision tools, and must take images', async (t) => {
