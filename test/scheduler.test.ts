@@ -78,7 +78,9 @@ test('a reopened session gets back its pending jobs, but not cancelled ones', as
   t.mock.timers.tick(60_000);
   assert.deepEqual(first.due, []);
 
+  // Starting twice still runs the job once.
   const reopened = start(first.entries);
+  await reopened.emit('session_start');
   await reopened.emit('session_start');
   t.mock.timers.tick(540_000);
   assert.deepEqual(reopened.due, [{ id: kept, prompt: 'In 10 minutes' }]);

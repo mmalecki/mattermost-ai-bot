@@ -8,6 +8,7 @@ import { after, test } from 'node:test';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import { type Agent, createAgent } from '../src/agent.ts';
 import { loadConfig } from '../src/config.ts';
+import type { ScheduledJob } from '../src/scheduler.ts';
 
 /** Opens the thread's session, with every tool allowed and no scheduled jobs unless `options` say otherwise. */
 function open(agent: Agent, rootId: string, options: Partial<Parameters<Agent['openSession']>[1]> = {}) {
@@ -251,4 +252,21 @@ test("closing a session shuts its extensions down, which closes its MCP servers'
   });
   await session.close();
   await until(() => existsSync(join(dir, 'stopped')));
+});
+
+test("a reopened session's scheduled jobs come due again", async (t) => {
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent } = await localAgent({ baseUrl: llm.url, env: { SCHEDULER: 'true' } });
+  // pi writes the session file once it's prompted.
+  const first = await open(agent, 'r1');
+  await first.prompt('hi');
+  first.appendEntry('scheduler', { timers: [{ id: 'j1', prompt: 'Check the garage', intervalMs: 1_000, recurring: false, expiresAt: Date.now() + 1_000 }] });
+  await first.close();
+
+  const due: ScheduledJob[] = [];
+  const reopened = await open(agent, 'r1', { onScheduled: (job) => due.push(job) });
+  await until(() => due.length > 0);
+  assert.deepEqual(due, [{ id: 'j1', prompt: 'Check the garage' }]);
+  await reopened.close();
 });

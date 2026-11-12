@@ -59,7 +59,15 @@ export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): E
       onDue({ id: job.id, prompt: job.prompt });
     };
 
+    const disarm = () => {
+      timers.forEach(clearTimeout);
+      timers.clear();
+    };
+
     pi.on('session_start', (_event, ctx) => {
+      // From scratch, should it start again, so no job is armed twice.
+      disarm();
+      jobs.clear();
       const now = Date.now();
       let changed = false;
       for (const job of pendingJobs(ctx.sessionManager.getEntries())) {
@@ -77,10 +85,7 @@ export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): E
       // Otherwise the dropped jobs would still count as pending, and keep the session open.
       if (changed) persist();
     });
-    pi.on('session_shutdown', () => {
-      timers.forEach(clearTimeout);
-      timers.clear();
-    });
+    pi.on('session_shutdown', disarm);
 
     pi.registerTool(
       defineTool({
