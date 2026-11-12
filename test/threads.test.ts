@@ -7,7 +7,7 @@ import type { ImageContent } from '@earendil-works/pi-ai';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import type { Agent, ThreadSession } from '../src/agent.ts';
 import { type ModelChoice, parseAllowedUsers, parseModel } from '../src/config.ts';
-import { type ImageStore, imageFiles } from '../src/images.ts';
+import { type ImageStore, imageFiles, ThreadImages } from '../src/images.ts';
 import type { ScheduledJob } from '../src/scheduler.ts';
 import { type Chat, type IncomingPost, type OutgoingFile, type PostFile, type ThreadPost, Threads } from '../src/threads.ts';
 
@@ -81,8 +81,8 @@ interface FakeSession {
   /** Which of TOOLS each run could call. */
   tools: string[][];
   entries: unknown[];
-  onScheduled: ((job: ScheduledJob) => void) | undefined;
-  imageStore: ImageStore | undefined;
+  onScheduled: (job: ScheduledJob) => void;
+  imageStore: ImageStore;
   closed: boolean;
 }
 
@@ -106,17 +106,16 @@ function fakeAgent(answer: Answer, images: boolean, imageTools: boolean, closing
   /** What happened to sessions, in order. */
   const events: string[] = [];
   const agent: Agent = {
-    imageTools,
     hasSession: (rootId) => prompted.has(rootId),
-    images: (rootId) => imageFiles(join(dir, rootId, 'images')),
     pickModel(ref) {
       const choice = parseModel(ref);
       if (!['anthropic', 'local'].includes(choice.provider)) return undefined;
       if (choice.model === 'missing') throw new Error(`there is no model ${choice.provider}/missing`);
       return choice;
     },
-    async openSession(rootId, { model, allowTools, onScheduled, imageStore }) {
+    async openSession(rootId, { model, allowTools, onScheduled }) {
       events.push(`open ${rootId}`);
+      const imageStore = new ThreadImages(imageFiles(join(dir, rootId, 'images')));
       const entries: unknown[] = [];
       const record: FakeSession = { model, prompts: [], images: [], allowed: [], tools: [], entries, onScheduled, imageStore, closed: false };
       sessions.set(rootId, record);
@@ -124,6 +123,8 @@ function fakeAgent(answer: Answer, images: boolean, imageTools: boolean, closing
       const session: ThreadSession = {
         model: model ?? MODEL,
         takesImages: images,
+        images: imageStore,
+        keepsImages: images || imageTools,
         get messages() {
           return messages as ThreadSession['messages'];
         },

@@ -18,7 +18,7 @@ import {
 import { type Config, type ModelChoice, parseModel } from './config.ts';
 import { errorMessage } from './error.ts';
 import { type ScheduledJob, scheduler } from './scheduler.ts';
-import { type ImageFiles, type ImageStore, imageFiles } from './images.ts';
+import { imageFiles, ThreadImages } from './images.ts';
 import { imageGeneration, mcpImages, mcpNamespace, mcpServers, threadPrompt, toolGuard, toolImages } from './tools.ts';
 import { imageCrop, VISION_TOOLS, vision } from './vision.ts';
 
@@ -27,12 +27,8 @@ import { imageCrop, VISION_TOOLS, vision } from './vision.ts';
 const FEATHER_PI_WEB = dirname(fileURLToPath(import.meta.resolve('@mmalecki/feather-pi-web/package.json')));
 
 export interface Agent {
-  /** Whether some tool takes images, such as generate_image to change them, so posts' images are kept for it. */
-  readonly imageTools: boolean;
   /** Whether the thread has a session from an earlier run. */
   hasSession(rootId: string): boolean;
-  /** The thread's images, kept in its directory. */
-  images(rootId: string): ImageFiles;
   /**
    * Parses `ref`, written `provider/model[:thinking]`, as a model to run a thread on. Returns
    * undefined when pi knows no such provider, so `ref` is ordinary text rather than a model. Throws
@@ -42,17 +38,14 @@ export interface Agent {
   /**
    * Opens the thread's session, creating it on first use. A new session runs on `model`, MODEL's by
    * default; an existing one on the model it was created with. With the scheduler on, `onScheduled`
-   * gets the thread's scheduled jobs as they come due; without it, the session can't schedule any.
-   * With some tool taking images, or IMAGE_MODEL set, `imageStore` keeps the images tools make and
-   * return, and finds those they're given.
+   * gets the thread's scheduled jobs as they come due.
    */
   openSession(
     rootId: string,
     options: {
       model?: ModelChoice;
       allowTools: (toolName: string) => boolean;
-      onScheduled?: (job: ScheduledJob) => void;
-      imageStore?: ImageStore;
+      onScheduled: (job: ScheduledJob) => void;
     },
   ): Promise<ThreadSession>;
 }
@@ -65,6 +58,10 @@ export interface ThreadSession {
   readonly model: ModelChoice;
   /** Whether that model takes images. */
   readonly takesImages: boolean;
+  /** The thread's images, kept in its directory: posted ones, and those tools made and returned. */
+  readonly images: ThreadImages;
+  /** Whether posts' images are kept in `images`: when the model or some tool takes them. */
+  readonly keepsImages: boolean;
   /** The conversation so far. */
   readonly messages: readonly AgentMessage[];
   /** Runs the agent on `text`, with `images`, until it is done answering. */
@@ -163,12 +160,11 @@ export async function createAgent(config: Config, botUsername: string): Promise<
 
   const imageEdits = !!imageModel?.input.includes('image');
   const { serverImages } = config.tools;
+  /** Whether some tool takes images, such as generate_image to change them, so posts' images are kept for it. */
   const imageTools = imageEdits || !!visionModel || Object.keys(serverImages).length > 0;
 
   return {
-    imageTools,
     hasSession: (rootId) => sessions.has(rootId),
-    images: (rootId) => imageFiles(join(threadDir(rootId), 'images')),
 
     pickModel(ref) {
       let choice;
@@ -185,11 +181,13 @@ export async function createAgent(config: Config, botUsername: string): Promise<
       return choice;
     },
 
-    async openSession(rootId, { model: choice, allowTools, onScheduled, imageStore }) {
+    async openSession(rootId, { model: choice, allowTools, onScheduled }) {
       mkdirSync(threadDir(rootId), { recursive: true });
       const sessionManager = SessionManager.open(sessionFile(rootId), threadDir(rootId), config.dataDir);
       const { model, thinkingLevel } = sessionModel(rootId, sessionManager, choice);
       const images = model.input.includes('image');
+      const imageStore = new ThreadImages(imageFiles(join(threadDir(rootId), 'images')));
+      const keepsImages = images || imageTools;
       const promptOptions = {
         botUsername,
         servers: config.tools.mcpServers,
@@ -213,12 +211,12 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           createCodemodeExtension(),
           createToolSearchExtension(),
           toolGuard(allowTools),
-          ...(config.scheduler && onScheduled ? [scheduler(rootId, onScheduled)] : []),
-          ...(imageModel && imageStore ? [imageGeneration(modelRuntime, imageModel, imageStore)] : []),
-          ...(visionModel && imageStore ? [vision(modelRuntime, visionModel, config.visionModel!.thinkingLevel, imageStore, images)] : []),
+          ...(config.scheduler ? [scheduler(rootId, onScheduled)] : []),
+          ...(imageModel ? [imageGeneration(modelRuntime, imageModel, imageStore)] : []),
+          ...(visionModel ? [vision(modelRuntime, visionModel, config.visionModel!.thinkingLevel, imageStore, images)] : []),
           // A model that sees images crops them to look closer, as pi scales them down.
-          ...((images || visionModel) && imageStore ? [imageCrop(imageStore, images)] : []),
-          ...((images || imageTools) && imageStore ? [toolImages(imageStore, ['generate_image', ...VISION_TOOLS]), mcpImages(serverImages, imageStore)] : []),
+          ...(images || visionModel ? [imageCrop(imageStore, images)] : []),
+          ...(keepsImages ? [toolImages(imageStore, ['generate_image', ...VISION_TOOLS]), mcpImages(serverImages, imageStore)] : []),
           threadPrompt(allowTools, prompt),
         ],
         noExtensions: true,
@@ -263,6 +261,8 @@ export async function createAgent(config: Config, botUsername: string): Promise<
       return {
         model: { provider: model.provider, model: model.id, thinkingLevel },
         takesImages: images,
+        images: imageStore,
+        keepsImages,
         get messages() {
           return session.messages;
         },

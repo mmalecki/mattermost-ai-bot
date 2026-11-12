@@ -3,7 +3,7 @@ import type { Agent, ThreadSession } from './agent.ts';
 import type { AllowedUsers, ModelChoice } from './config.ts';
 import { textOf } from './content.ts';
 import { errorMessage } from './error.ts';
-import { download, imageSource, ThreadImages } from './images.ts';
+import { download, imageSource } from './images.ts';
 import { pendingJobs, type ScheduledJob } from './scheduler.ts';
 import { formatTime } from './time.ts';
 
@@ -162,8 +162,6 @@ class Thread {
   #pending = false;
   /** Scheduled jobs that came due, run after any new posts. */
   readonly #jobs: ScheduledJob[] = [];
-  /** The thread's images: posted ones, and those tools made and returned. */
-  readonly #images: ThreadImages;
   /** Whether the current run may call a tool, by its name. */
   #allowed: (toolName: string) => boolean = () => false;
   #idleTimer: NodeJS.Timeout | undefined;
@@ -176,7 +174,6 @@ class Thread {
     this.#firstPostId = firstPostId;
     this.#previous = previous;
     this.#retire = retire;
-    this.#images = new ThreadImages(context.agent.images(rootId));
   }
 
   wake(): void {
@@ -243,7 +240,6 @@ class Thread {
       model,
       allowTools: (toolName) => this.#allowed(toolName),
       onScheduled: (due) => this.due(due),
-      imageStore: this.#images,
     }));
   }
 
@@ -277,7 +273,7 @@ class Thread {
     session.appendEntry(SEEN_ENTRY, entry);
 
     console.log(`Thread ${this.#rootId}: ${posts.length} new post(s) from ${[...new Set(names)].join(', ')}`);
-    const { lines, images } = await this.#attachments(posts, session.takesImages);
+    const { lines, images } = await this.#attachments(posts, session);
     await this.#answer(session, formatPosts(posts, names, lines), images);
   }
 
@@ -299,19 +295,17 @@ class Thread {
 
   /**
    * The posts' files: lines naming each, and the images the model can see, in the order of their
-   * lines, if it takes `images`. Images are kept in the thread when the model or some tool takes them,
-   * and named as they're kept. A file that can't be handed over is only named, so answering doesn't
-   * fail on it.
+   * lines, if it takes images. Images are kept in the thread when the session keeps them, and named
+   * as they're kept. A file that can't be handed over is only named, so answering doesn't fail on it.
    */
-  async #attachments(posts: ThreadPost[], takesImages: boolean): Promise<{ lines: string[][]; images: ImageContent[] }> {
-    const { agent } = this.#context;
+  async #attachments(posts: ThreadPost[], session: ThreadSession): Promise<{ lines: string[][]; images: ImageContent[] }> {
     const images: ImageContent[] = [];
     const lines: string[][] = [];
     for (const post of posts) {
       const postLines: string[] = [];
       for (const file of post.files) {
         const image = file.mimeType.startsWith('image/');
-        if (image && (takesImages || agent.imageTools)) postLines.push(await this.#image(file, images, takesImages));
+        if (image && session.keepsImages) postLines.push(await this.#image(file, images, session));
         else postLines.push(fileLine(file));
       }
       lines.push(postLines);
@@ -320,23 +314,23 @@ class Thread {
   }
 
   /**
-   * Keeps the image in the thread, and returns its line, with the name it's kept under. When the model
-   * `takesImages`, adds it to `images` too.
+   * Keeps the image in the session's images, and returns its line, with the name it's kept under. When
+   * the model takes images, adds it to `images` too.
    */
-  async #image(file: PostFile, images: ImageContent[], takesImages: boolean): Promise<string> {
+  async #image(file: PostFile, images: ImageContent[], session: ThreadSession): Promise<string> {
     const source = imageSource(file);
     if (!source) return `[image: ${file.name}, not shown: too large, or in a format you can't see]`;
     let image: ImageContent;
     let name: string;
     try {
       image = await download(this.#context.chat, file.id, source);
-      name = await this.#images.save(file.name, image);
+      name = await session.images.save(file.name, image);
     } catch (error) {
       console.warn(`Thread ${this.#rootId}: image ${file.id} couldn't be downloaded:`, errorMessage(error));
       return `[image: ${file.name}, not shown: it couldn't be downloaded]`;
     }
     // The model can't see it, but tools can still take it.
-    if (!takesImages) return `[image: ${name}, which you can't see]`;
+    if (!session.takesImages) return `[image: ${name}, which you can't see]`;
     if (images.length >= MAX_IMAGES) return `[image: ${name}, not shown: too many images at once]`;
     images.push(image);
     return `[image ${images.length}: ${name}]`;
@@ -370,10 +364,10 @@ class Thread {
 
   async #answer(session: ThreadSession, prompt: string, images: ImageContent[] = []): Promise<void> {
     const startedAt = Date.now();
-    this.#images.startRun();
+    session.images.startRun();
     await session.prompt(prompt, images);
     const reply = replyText(session, startedAt);
-    const files = await this.#images.takeAttached();
+    const files = await session.images.takeAttached();
     // pi drops an answer cut off at the output limit to compact and retry, and the retry may not happen.
     if (reply === NO_ANSWER) console.warn(`Thread ${this.#rootId}: the run added no answer`);
     if (reply || files.length) {

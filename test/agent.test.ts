@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
-import { buildSystemPrompt, createAgent, directServers, permalink } from '../src/agent.ts';
+import { type Agent, buildSystemPrompt, createAgent, directServers, permalink } from '../src/agent.ts';
 import { loadConfig } from '../src/config.ts';
 
 test("lists what directly exposed servers the thread has tools of offer, in the format of pi's mcp_servers section", () => {
@@ -84,6 +84,11 @@ test('tells the model which servers the thread has tools of take images by name'
 });
 
 
+/** Opens the thread's session, with every tool allowed and no scheduled jobs unless `options` say otherwise. */
+function open(agent: Agent, rootId: string, options: Partial<Parameters<Agent['openSession']>[1]> = {}) {
+  return agent.openSession(rootId, { allowTools: () => true, onScheduled: () => {}, ...options });
+}
+
 /** An agent on `local/small`, from a models.json that also has `local/large`, which takes images. */
 const dirs: string[] = [];
 after(() => dirs.forEach((dir) => rmSync(dir, { recursive: true, force: true })));
@@ -147,7 +152,7 @@ test('a session runs on the model it was created with, MODEL by default', async 
   const options = { allowTools: () => false };
   const large = { provider: 'local', model: 'large', thinkingLevel: 'high' } as const;
 
-  let session = await agent.openSession('r1', { ...options, model: large });
+  let session = await open(agent, 'r1', { ...options, model: large });
   assert.deepEqual([session.model, session.takesImages], [large, true]);
   // A thread has a session once it has been prompted, as pi writes its file then.
   assert.equal(agent.hasSession('r1'), false);
@@ -159,11 +164,11 @@ test('a session runs on the model it was created with, MODEL by default', async 
   assert.deepEqual([answer.role, answer.content], ['assistant', [{ type: 'text', text: 'hello' }]]);
   await session.close();
 
-  session = await agent.openSession('r1', options);
+  session = await open(agent, 'r1', options);
   assert.deepEqual([session.model, session.takesImages], [large, true]);
   await session.close();
 
-  session = await agent.openSession('r2', options);
+  session = await open(agent, 'r2', options);
   assert.deepEqual([session.model, session.takesImages], [{ provider: 'local', model: 'small', thinkingLevel: 'off' }, false]);
   await session.close();
   assert.deepEqual(llm.models, ['large']);
@@ -178,7 +183,7 @@ test('the model is declared only the tools the thread may use, which stay away u
   t.after(llm.close);
   const { agent } = await localAgent({ baseUrl: llm.url });
   let allowed = (_name: string) => true;
-  const session = await agent.openSession('r1', { allowTools: (name) => allowed(name) });
+  const session = await open(agent, 'r1', { allowTools: (name) => allowed(name) });
   await session.prompt('hi');
   assert.ok(llm.tools[0]!.includes('webfetch'));
 
@@ -192,7 +197,7 @@ test('the model is declared only the tools the thread may use, which stay away u
   await session.close();
 
   // A reopened session declares its tools afresh, and they are taken away again as needed.
-  const reopened = await agent.openSession('r1', { allowTools: (name) => allowed(name) });
+  const reopened = await open(agent, 'r1', { allowTools: (name) => allowed(name) });
   await reopened.prompt('now?');
   assert.deepEqual(llm.tools[3], llm.tools[0]);
   allowed = (name) => name !== 'webfetch';
@@ -205,7 +210,7 @@ test('SCHEDULER gives sessions the schedule tool, and tells the model how due jo
   const llm = await fakeLlm();
   t.after(llm.close);
   const { agent } = await localAgent({ baseUrl: llm.url, env: { SCHEDULER: 'true' } });
-  const session = await agent.openSession('r1', { allowTools: () => true, onScheduled: () => {} });
+  const session = await open(agent, 'r1');
   await session.prompt('hi');
   assert.ok(llm.tools[0]!.includes('schedule'));
   assert.match(llm.prompts[0]!, /Scheduled job <id> is due/);
@@ -216,9 +221,8 @@ test("the system prompt tells the model only about the tools the thread may use,
   const llm = await fakeLlm();
   t.after(llm.close);
   const { agent } = await localAgent({ baseUrl: llm.url });
-  const imageStore = { ...agent.images('r1'), attach: () => {} };
   let allowed = (_name: string) => true;
-  const session = await agent.openSession('r1', { model: { provider: 'local', model: 'large', thinkingLevel: 'off' }, allowTools: (name) => allowed(name), imageStore });
+  const session = await open(agent, 'r1', { model: { provider: 'local', model: 'large', thinkingLevel: 'off' }, allowTools: (name) => allowed(name) });
   await session.prompt('hi');
   assert.ok(llm.tools[0]!.includes('crop_image'));
   assert.match(llm.prompts[0]!, /You are @sailor/);
@@ -233,7 +237,7 @@ test("the system prompt tells the model only about the tools the thread may use,
   await session.close();
 
   // A thread that never had the tool isn't told of it from its first request.
-  const restricted = await agent.openSession('r2', { model: { provider: 'local', model: 'large', thinkingLevel: 'off' }, allowTools: (name) => name !== 'crop_image', imageStore });
+  const restricted = await open(agent, 'r2', { model: { provider: 'local', model: 'large', thinkingLevel: 'off' }, allowTools: (name) => name !== 'crop_image' });
   await restricted.prompt('hi');
   assert.ok(!llm.tools[2]!.includes('crop_image'));
   assert.match(llm.prompts[2]!, /You are @sailor/);
@@ -248,29 +252,30 @@ test('VISION_MODEL gives sessions the vision tools, and must take images', async
   const llm = await fakeLlm();
   t.after(llm.close);
   const { agent } = await localAgent({ baseUrl: llm.url, env: { VISION_MODEL: 'local/large:low' } });
-  assert.equal(agent.imageTools, true);
-  const imageStore = { ...agent.images('r1'), attach: () => {} };
-  const session = await agent.openSession('r1', { allowTools: () => true, imageStore });
+  const session = await open(agent, 'r1');
+  // The model doesn't see images, but the vision tools take them.
+  assert.equal(session.keepsImages, true);
   await session.prompt('hi');
   for (const tool of ['look_at_image', 'locate', 'crop_image']) assert.ok(llm.tools[0]!.includes(tool), tool);
   await session.close();
 
   // A model that sees images looks at them itself.
-  const seeing = await agent.openSession('r2', { model: { provider: 'local', model: 'large', thinkingLevel: 'off' }, allowTools: () => true, imageStore });
+  const seeing = await open(agent, 'r2', { model: { provider: 'local', model: 'large', thinkingLevel: 'off' } });
   await seeing.prompt('hi');
   assert.deepEqual(['look_at_image', 'locate', 'crop_image'].map((tool) => llm.tools[1]!.includes(tool)), [false, true, true]);
   await seeing.close();
 
-  assert.equal((await localAgent()).agent.imageTools, false);
+  const plain = await open((await localAgent()).agent, 'r1');
+  assert.equal(plain.keepsImages, false);
+  await plain.close();
 });
 
 test('a model that sees images can crop them without VISION_MODEL', async (t) => {
   const llm = await fakeLlm();
   t.after(llm.close);
   const { agent } = await localAgent({ baseUrl: llm.url });
-  const imageStore = { ...agent.images('r1'), attach: () => {} };
   for (const model of ['large', 'small']) {
-    const session = await agent.openSession(model, { model: { provider: 'local', model, thinkingLevel: 'off' }, allowTools: () => true, imageStore });
+    const session = await open(agent, model, { model: { provider: 'local', model, thinkingLevel: 'off' } });
     await session.prompt('hi');
     await session.close();
   }
