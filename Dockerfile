@@ -1,6 +1,4 @@
 FROM node:24-alpine AS build
-# pi-ate-scheduler is installed from GitHub.
-RUN apk add --no-cache git
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev

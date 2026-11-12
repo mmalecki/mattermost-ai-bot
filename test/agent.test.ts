@@ -201,6 +201,17 @@ test('the model is declared only the tools the thread may use, which stay away u
   await reopened.close();
 });
 
+test('SCHEDULER gives sessions the schedule tool, and tells the model how due jobs reach it', async (t) => {
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent } = await localAgent({ baseUrl: llm.url, env: { SCHEDULER: 'true' } });
+  const session = await agent.openSession('r1', { allowTools: () => true, onScheduled: () => {} });
+  await session.prompt('hi');
+  assert.ok(llm.tools[0]!.includes('schedule'));
+  assert.match(llm.prompts[0]!, /Scheduled job <id> is due/);
+  await session.close();
+});
+
 test("the system prompt tells the model only about the tools the thread may use, and not pi's cwd", async (t) => {
   const llm = await fakeLlm();
   t.after(llm.close);

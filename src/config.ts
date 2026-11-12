@@ -22,7 +22,7 @@ export interface Config {
   /** The chat model the agent's vision tools look at images with, which must take them. Unset: no vision tools. */
   visionModel: ModelChoice | undefined;
   tools: ToolsConfig;
-  /** Whether the agent can schedule jobs in its threads, with pi-ate-scheduler. */
+  /** Whether the agent can schedule jobs in its threads. */
   scheduler: boolean;
   /** Whether the agent always has `codemode`, not only with servers of `codemode` exposure. */
   codemode: boolean;

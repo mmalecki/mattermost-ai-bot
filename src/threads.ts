@@ -5,6 +5,7 @@ import { textOf } from './content.ts';
 import { errorMessage } from './error.ts';
 import { download, imageSource, ThreadImages } from './images.ts';
 import { pendingJobs, type ScheduledJob } from './scheduler.ts';
+import { formatTime } from './time.ts';
 
 export interface ThreadPost {
   id: string;
@@ -186,7 +187,7 @@ class Thread {
 
   due(job: ScheduledJob): void {
     if (this.#closed) {
-      // The extension has already counted it as run, so it won't come due again.
+      // The scheduler has already taken it off, or moved it on to its next time, so this run of it is lost.
       console.warn(`Thread ${this.#rootId}: closing, so scheduled job ${job.id} is dropped`);
       return;
     }
@@ -410,17 +411,6 @@ function seenPosts(session: ThreadSession): Seen {
   return { createAt, userIds };
 }
 
-// With its UTC offset, so the model can compare post times with tool results in other zones.
-// Follows TZ.
-const timeFormat = new Intl.DateTimeFormat('sv-SE', {
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-  timeZoneName: 'shortOffset',
-});
-
 /**
  * `message` without its last word, when that is `/provider/model[:thinking]`, and the word without
  * its slash. Whether it names a model is the agent's to say.
@@ -441,13 +431,13 @@ export function formatPosts(posts: ThreadPost[], names: string[], attachments: s
   return posts
     .map((p, i) => {
       const text = [p.message, ...(attachments[i] ?? [])].filter(Boolean).join('\n');
-      return `@${names[i]} (${timeFormat.format(p.createAt)}, post ${p.id}): ${text}`;
+      return `@${names[i]} (${formatTime(p.createAt)}, post ${p.id}): ${text}`;
     })
     .join('\n\n');
 }
 
 export function formatJob(job: ScheduledJob, now: number): string {
-  return `Scheduled job ${job.id} is due (${timeFormat.format(now)}): ${job.prompt}`;
+  return `Scheduled job ${job.id} is due (${formatTime(now)}): ${job.prompt}`;
 }
 
 const NO_ANSWER = "Sorry, I couldn't come up with an answer.";

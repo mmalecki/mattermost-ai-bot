@@ -17,7 +17,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import { type Config, type ModelChoice, parseModel } from './config.ts';
 import { errorMessage } from './error.ts';
-import { loadScheduler, type ScheduledJob, scheduler } from './scheduler.ts';
+import { type ScheduledJob, scheduler } from './scheduler.ts';
 import { type ImageFiles, imageFiles } from './images.ts';
 import { type ImageStore, imageGeneration, mcpImages, mcpNamespace, mcpServers, threadPrompt, toolGuard, toolImages } from './tools.ts';
 import { imageCrop, VISION_TOOLS, vision } from './vision.ts';
@@ -142,8 +142,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
     console.log(`Vision model: ${visionModel.provider}/${visionModel.id} (thinking ${config.visionModel!.thinkingLevel})`);
   }
 
-  const schedulerExtension = config.scheduler ? await loadScheduler() : undefined;
-  if (schedulerExtension) console.log('Scheduler: on');
+  if (config.scheduler) console.log('Scheduler: on');
 
   /** A thread's directory, which holds its session and its images. */
   const threadDir = (rootId: string) => join(sessionDir, rootId);
@@ -214,7 +213,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           createCodemodeExtension(),
           createToolSearchExtension(),
           toolGuard(allowTools),
-          ...(schedulerExtension && onScheduled ? [scheduler(schedulerExtension, onScheduled)] : []),
+          ...(config.scheduler && onScheduled ? [scheduler(rootId, onScheduled)] : []),
           ...(imageModel && imageStore ? [imageGeneration(modelRuntime, imageModel, imageStore)] : []),
           ...(visionModel && imageStore ? [vision(modelRuntime, visionModel, config.visionModel!.thinkingLevel, imageStore, images)] : []),
           // A model that sees images crops them to look closer, as pi scales them down.
