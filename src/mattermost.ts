@@ -159,7 +159,7 @@ export class Mattermost implements Chat {
     return name;
   }
 
-  async reply(channelId: string, rootId: string, message: string, files: OutgoingFile[] = []): Promise<(string | undefined)[]> {
+  async reply(channelId: string, rootId: string, message: string, files: OutgoingFile[] = []): Promise<void> {
     // A file that can't be uploaded is named in the reply instead, so the answer still gets through.
     const uploads = await Promise.allSettled(files.map((file) => this.#upload(channelId, file)));
     const fileIds: string[] = [];
@@ -175,7 +175,6 @@ export class Mattermost implements Chat {
     for (const post of replyPosts(text, fileIds, MAX_POST_CHARS, MAX_POST_FILES)) {
       await this.#client.createPost({ channel_id: channelId, root_id: rootId, ...post });
     }
-    return uploads.map((upload) => (upload.status === 'fulfilled' ? upload.value : undefined));
   }
 
   async #upload(channelId: string, file: OutgoingFile): Promise<string> {

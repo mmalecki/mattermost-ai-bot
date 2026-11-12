@@ -52,19 +52,8 @@ class FakeChat implements Chat {
     if (this.gone.has(userId)) throw new Error(`no user ${userId}`);
     return USERS[userId] ?? userId;
   }
-  /** Whether attaching files fails. */
-  uploadFails = false;
-  #uploads = 0;
-
-  /** Attached files can be downloaded again, as `u<n>`. */
   async reply(channelId: string, rootId: string, message: string, files: OutgoingFile[] = []) {
     this.replies.push({ channelId, rootId, message, ...(files.length ? { files } : {}) });
-    return files.map((file) => {
-      if (this.uploadFails) return undefined;
-      const id = `u${++this.#uploads}`;
-      this.files.set(id, file.data);
-      return id;
-    });
   }
   typing() {}
 }

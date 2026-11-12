@@ -35,10 +35,10 @@ export interface Chat {
   file(fileId: string, preview: boolean): Promise<Uint8Array>;
   username(userId: string): Promise<string>;
   /**
-   * Posts `message`, which may be empty when there are files, with `files` attached. Returns their ids, in
-   * order, with undefined for one that couldn't be attached.
+   * Posts `message`, which may be empty when there are files, with `files` attached. A file that can't
+   * be attached is named in the reply instead.
    */
-  reply(channelId: string, rootId: string, message: string, files?: OutgoingFile[]): Promise<(string | undefined)[]>;
+  reply(channelId: string, rootId: string, message: string, files?: OutgoingFile[]): Promise<void>;
   typing(channelId: string, rootId: string): void;
 }
 

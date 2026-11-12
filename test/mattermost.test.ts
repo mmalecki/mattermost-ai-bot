@@ -221,7 +221,7 @@ test("a reply names the files that couldn't be uploaded, attaches the rest, and 
   const { mattermost, server } = await listening(t);
   t.mock.method(console, 'error', () => {});
   const file = (name: string) => ({ name, mimeType: 'image/png', data: new Uint8Array([1]) });
-  assert.deepEqual(await mattermost.reply('dm', 'r1', 'Here.', [file('a.png'), file('bad.png')]), ['f-a.png', undefined]);
+  await mattermost.reply('dm', 'r1', 'Here.', [file('a.png'), file('bad.png')]);
   assert.deepEqual(server.created, [{ channel_id: 'dm', root_id: 'r1', message: "Here.\n\n_(bad.png couldn't be attached: too large)_", file_ids: ['f-a.png'] }]);
 
   await mattermost.reply('dm', 'r1', `${'a'.repeat(16_000)}\n\nb`);
