@@ -195,8 +195,9 @@ function advance(job: Job, now: number): void {
   job.expiresAt += Math.max(1, Math.floor((now - job.expiresAt) / job.intervalMs) + 1) * job.intervalMs;
 }
 
+/** `job`, with when it's due to the second, as one-off jobs can be due in seconds. */
 function describe(job: Job): string {
-  return `job ${job.id}, due ${formatTime(job.expiresAt)}${job.recurring ? `, then every ${duration(job.intervalMs)}` : ''}: ${job.prompt}`;
+  return `job ${job.id}, due ${formatTime(job.expiresAt, { seconds: true })}${job.recurring ? `, then every ${duration(job.intervalMs)}` : ''}: ${job.prompt}`;
 }
 
 const UNITS = [

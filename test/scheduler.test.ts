@@ -51,7 +51,7 @@ test('a due job goes to the thread, and then is no longer pending', async (t) =>
   const id = await create(120_000, 'Check the garage');
   assert.deepEqual(savedJobs(entries).map((j) => j.id), [id]);
   assert.equal(hasPendingJobs(), true);
-  assert.match(await schedule({ action: 'list' }), new RegExp(`^job ${id}, due 2026-10-25 \\d\\d:02 GMT[+-]?\\d*: Check the garage$`));
+  assert.match(await schedule({ action: 'list' }), new RegExp(`^job ${id}, due 2026-10-25 \\d\\d:02:00 GMT[+-]?\\d*: Check the garage$`));
   t.mock.timers.tick(119_000);
   assert.deepEqual(due, []);
   t.mock.timers.tick(1_000);
@@ -59,6 +59,14 @@ test('a due job goes to the thread, and then is no longer pending', async (t) =>
   assert.deepEqual(savedJobs(entries), []);
   assert.equal(hasPendingJobs(), false);
   assert.equal(await schedule({ action: 'list' }), 'No jobs are scheduled in this thread.');
+});
+
+test('says when a job is due to the second, as one may be due in seconds', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: NOW + 40_000 });
+  const { emit, schedule } = start();
+  await emit('session_start');
+  assert.match(await schedule({ action: 'create', interval_ms: 30_000, prompt: 'Soon' }), /^Scheduled: job \w+, due 2026-10-25 \d\d:01:10 GMT[+-]?\d*: Soon$/);
+  await emit('session_shutdown');
 });
 
 test('a recurring job comes due every interval until cancelled', async (t) => {
