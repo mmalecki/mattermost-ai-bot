@@ -7,10 +7,9 @@ import type { ImageContent } from '@earendil-works/pi-ai';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import type { Agent, ThreadSession } from '../src/agent.ts';
 import { type ModelChoice, parseAllowedUsers, parseModel } from '../src/config.ts';
-import { imageFiles } from '../src/images.ts';
+import { type ImageStore, imageFiles } from '../src/images.ts';
 import type { ScheduledJob } from '../src/scheduler.ts';
 import { type Chat, type IncomingPost, type OutgoingFile, type PostFile, type ThreadPost, Threads } from '../src/threads.ts';
-import type { ImageStore } from '../src/tools.ts';
 
 const BOT = 'bot';
 const USERS: Record<string, string> = { u1: 'maciej', u2: 'guest', u3: 'carol' };

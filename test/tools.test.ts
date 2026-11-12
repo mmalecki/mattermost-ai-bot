@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AssistantImages, ImageApi, ImageContent, ImageModel } from '@earendil-works/pi-ai';
 import type { ExtensionAPI, ToolDefinition } from '@earendil-works/pi-coding-agent';
-import { type ImageStore, imageGeneration, mcpImages, mcpServers, stripCwd, toolGuard, toolImages } from '../src/tools.ts';
+import type { ImageStore } from '../src/images.ts';
+import { imageGeneration, mcpImages, mcpServers, stripCwd, toolGuard, toolImages } from '../src/tools.ts';
 
 const blocked = (toolName: string) => ({ block: true, reason: `${toolName} is off in this thread: someone who has posted in it is not allowed to use it.` });
 

@@ -2,7 +2,6 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import type { ImageContent } from '@earendil-works/pi-ai';
 import type { Chat, OutgoingFile, PostFile } from './threads.ts';
-import type { ImageStore } from './tools.ts';
 
 /** The image formats models take, with the file extension each is kept under. */
 const IMAGE_EXTENSIONS: Record<string, string> = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };
@@ -45,6 +44,12 @@ export interface ImageFiles {
   get(names: string[]): Promise<ImageContent[]>;
   /** Where the image `name` names is kept. Throws, as get() does, for a name the thread has no image under. */
   path(name: string): Promise<string>;
+}
+
+/** The thread's images, for the tools that make and take them. */
+export interface ImageStore extends ImageFiles {
+  /** Attaches the image `name` names, one kept in the thread, to the reply. */
+  attach(name: string): void;
 }
 
 /** The images kept in `dir`, which is created once one is. */

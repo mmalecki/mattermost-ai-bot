@@ -3,7 +3,7 @@ import { defineTool, type ExtensionFactory, type McpServerConfig, type ModelRunt
 import type { ImageArguments, ImageForm } from './config.ts';
 import { textOf } from './content.ts';
 import { errorMessage } from './error.ts';
-import type { ImageFiles } from './images.ts';
+import type { ImageFiles, ImageStore } from './images.ts';
 
 /** Why a call is blocked. Every tool may be off, so this doesn't say others are left. */
 const blocked = (toolName: string) => `${toolName} is off in this thread: someone who has posted in it is not allowed to use it.`;
@@ -67,12 +67,6 @@ export function toolGuard(allowed: (toolName: string) => boolean): ExtensionFact
     pi.on('turn_start', narrow);
     pi.on('tool_call', (event) => (allowed(event.toolName) ? undefined : { block: true, reason: blocked(event.toolName) }));
   };
-}
-
-/** The thread's images, for the tools that make and take them. */
-export interface ImageStore extends ImageFiles {
-  /** Attaches the image `name` names, one kept in the thread, to the reply. */
-  attach(name: string): void;
 }
 
 /**

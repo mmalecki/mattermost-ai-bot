@@ -18,8 +18,8 @@ import {
 import { type Config, type ModelChoice, parseModel } from './config.ts';
 import { errorMessage } from './error.ts';
 import { type ScheduledJob, scheduler } from './scheduler.ts';
-import { type ImageFiles, imageFiles } from './images.ts';
-import { type ImageStore, imageGeneration, mcpImages, mcpNamespace, mcpServers, threadPrompt, toolGuard, toolImages } from './tools.ts';
+import { type ImageFiles, type ImageStore, imageFiles } from './images.ts';
+import { imageGeneration, mcpImages, mcpNamespace, mcpServers, threadPrompt, toolGuard, toolImages } from './tools.ts';
 import { imageCrop, VISION_TOOLS, vision } from './vision.ts';
 
 // Published as TypeScript, which Node won't strip under node_modules, so pi loads it like any
