@@ -36,6 +36,10 @@ test('MCP servers that take images get them in place of their names, in their im
     url: 'data:image/png;base64,cG5n',
   });
   assert.deepEqual(await call('mcp__files__open', { path: 'garage.png' }), { path: '/images/garage.png' });
+  // Image data, or a path, already given in an image argument stays as it is, as does a name of no image here.
+  for (const path of ['data:image/png;base64,cG5n', '/srv/scans/garage.png', 'other.png']) {
+    assert.deepEqual(await call('mcp__files__open', { path }), { path });
+  }
   // In another argument, it stays a name, as do names the thread has no image under, and other servers' tools' arguments.
   assert.deepEqual(await call('mcp__bar_codes__decode', { path: 'garage.png' }), { path: 'garage.png' });
   assert.deepEqual(await call('mcp__bar_codes__decode', { base64: 'other.png' }), { base64: 'other.png' });

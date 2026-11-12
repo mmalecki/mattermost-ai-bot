@@ -3,7 +3,10 @@ import type { ImageStore } from '../src/images.ts';
 
 export const PNG = { type: 'image' as const, data: 'cG5n', mimeType: 'image/png' };
 
-/** A store that holds `stored` images, and keeps those saved to it under `<name>-<n>`. */
+/**
+ * A store that holds `stored` images, under `/images/`, and keeps those saved to it under `<name>-<n>`.
+ * Like the real one, it refuses names it has no image under.
+ */
 export function fakeStore(stored: Record<string, ImageContent> = {}) {
   const saved: { name: string; image: ImageContent }[] = [];
   const attached: string[] = [];
@@ -19,6 +22,7 @@ export function fakeStore(stored: Record<string, ImageContent> = {}) {
       });
     },
     async path(name) {
+      if (!stored[name]) throw new Error(`no ${name}`);
       return `/images/${name}`;
     },
     attach: (name) => attached.push(name),
