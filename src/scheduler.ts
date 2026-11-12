@@ -63,9 +63,12 @@ export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): T
         throw error;
       }
     };
-    const arm = (job: Job) => timers.set(job.id, setTimeout(() => fire(job), Math.max(0, job.expiresAt - Date.now())));
+    // No longer than Node's timers can wait, so a job further off, such as one the clock was set back
+    // for, is armed again until it's due.
+    const arm = (job: Job) => timers.set(job.id, setTimeout(() => fire(job), Math.min(MAX_INTERVAL_MS, Math.max(0, job.expiresAt - Date.now()))));
     // Off the schedule, or on to its next time, before it's run, so a run that fails doesn't repeat it.
     const fire = (job: Job) => {
+      if (job.expiresAt > Date.now()) return void arm(job);
       timers.delete(job.id);
       if (job.recurring) {
         advance(job, Date.now());
@@ -165,12 +168,21 @@ export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): T
   }
 }
 
-/** The jobs the thread had pending, as the session's latest snapshot of them saved them. */
+/**
+ * The jobs the thread had pending, as the session's latest snapshot of them saved them. Any that
+ * schedule couldn't have made, such as in a file edited by hand, are left out.
+ */
 export function savedJobs(entries: SessionEntry[]): Job[] {
   const latest = entries.findLast((e) => e.type === 'custom' && e.customType === SNAPSHOT_ENTRY) as Snapshot | undefined;
   return (latest?.data?.timers ?? [])
-    .filter((job) => (job.status ?? 'active') === 'active')
+    .filter((job) => (job.status ?? 'active') === 'active' && isJob(job))
     .map(({ id, prompt, intervalMs, recurring, expiresAt }) => ({ id, prompt, intervalMs, recurring, expiresAt }));
+}
+
+function isJob(job: Partial<Record<keyof Job, unknown>>): boolean {
+  const { id, prompt, intervalMs, recurring, expiresAt } = job;
+  if (typeof id !== 'string' || typeof prompt !== 'string' || typeof recurring !== 'boolean' || !Number.isFinite(expiresAt)) return false;
+  return typeof intervalMs === 'number' && intervalMs >= (recurring ? MIN_RECURRING_MS : MIN_INTERVAL_MS) && intervalMs <= MAX_INTERVAL_MS;
 }
 
 /** Moves a recurring `job` on to its first time after `now`, keeping to its times, such as 7:00 every day. */

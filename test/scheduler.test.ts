@@ -165,3 +165,31 @@ test("a job that couldn't be saved isn't scheduled, and one that comes due runs 
   assert.equal(hasPendingJobs(), false);
   assert.equal(error.mock.callCount(), 1);
 });
+
+test('leaves out saved jobs schedule could not have made', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: NOW });
+  const job = { id: 'j', prompt: 'x', intervalMs: 60_000, recurring: true, expiresAt: NOW + 60_000 };
+  const broken = [{ ...job, intervalMs: 0 }, { ...job, intervalMs: undefined }, { ...job, expiresAt: Number.NaN }, { ...job, id: 7 }, { ...job, recurring: 'yes' }];
+  const { due, emit, hasPendingJobs } = start([{ type: 'custom', customType: 'scheduler', data: { timers: [...broken, job] } } as SessionEntry]);
+  await emit('session_start');
+  t.mock.timers.tick(60_000);
+  assert.deepEqual(due, [{ id: 'j', prompt: 'x' }]);
+  assert.equal(hasPendingJobs(), true);
+  await emit('session_shutdown');
+});
+
+test("a job due further off than Node's timers can wait, such as after the clock was set back, comes due once, on time", async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: NOW });
+  const day = 86_400_000;
+  const daily = { id: 'd', prompt: 'Daily', intervalMs: day, recurring: true, expiresAt: NOW + 30 * day };
+  const { due, emit } = start([{ type: 'custom', customType: 'scheduler', data: { timers: [daily] } } as SessionEntry]);
+  await emit('session_start');
+  t.mock.timers.tick(1);
+  t.mock.timers.tick(2 ** 31 - 1);
+  assert.deepEqual(due, []);
+  t.mock.timers.tick(30 * day - 2 ** 31);
+  assert.deepEqual(due, [{ id: 'd', prompt: 'Daily' }]);
+  t.mock.timers.tick(day);
+  assert.equal(due.length, 2);
+  await emit('session_shutdown');
+});
