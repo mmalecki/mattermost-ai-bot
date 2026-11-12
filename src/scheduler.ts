@@ -53,6 +53,16 @@ export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): T
   function extension(pi: ExtensionAPI): void {
     // Copies, as pi keeps the entry, and the jobs change.
     const persist = () => pi.appendEntry(SNAPSHOT_ENTRY, { timers: [...jobs.values()].map((job) => ({ ...job })) });
+    /** Makes `change` to the jobs and saves them, or undoes it if saving fails. */
+    const save = (change: () => void, undo: () => void) => {
+      change();
+      try {
+        persist();
+      } catch (error) {
+        undo();
+        throw error;
+      }
+    };
     const arm = (job: Job) => timers.set(job.id, setTimeout(() => fire(job), Math.max(0, job.expiresAt - Date.now())));
     // Off the schedule, or on to its next time, before it's run, so a run that fails doesn't repeat it.
     const fire = (job: Job) => {
@@ -63,7 +73,12 @@ export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): T
       } else {
         jobs.delete(job.id);
       }
-      persist();
+      // In a timer, where an error would end the bot. The job runs all the same.
+      try {
+        persist();
+      } catch (error) {
+        console.error(`Thread ${rootId}: saving its scheduled jobs failed:`, error);
+      }
       onDue({ id: job.id, prompt: job.prompt });
     };
 
@@ -120,11 +135,14 @@ export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): T
           }
           if (action === 'cancel') {
             if (!id) throw new Error('id must name the job to cancel.');
-            if (!jobs.has(id)) throw new Error(`There is no job ${id} in this thread. List them for their ids.`);
-            jobs.delete(id);
+            const job = jobs.get(id);
+            if (!job) throw new Error(`There is no job ${id} in this thread. List them for their ids.`);
+            save(
+              () => jobs.delete(id),
+              () => jobs.set(id, job),
+            );
             clearTimeout(timers.get(id));
             timers.delete(id);
-            persist();
             return result(`Cancelled job ${id}.`);
           }
           const [min, label] = recurring ? [MIN_RECURRING_MS, 'a minute, for a recurring job'] : [MIN_INTERVAL_MS, '5 seconds'];
@@ -134,9 +152,12 @@ export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): T
           if (!prompt?.trim()) throw new Error('prompt must say what to do when the job is due.');
           if (jobs.size >= MAX_JOBS) throw new Error(`This thread already has ${MAX_JOBS} scheduled jobs. Cancel one first.`);
           const job: Job = { id: randomBytes(4).toString('hex'), prompt, intervalMs: ms, recurring, expiresAt: Date.now() + ms };
-          jobs.set(job.id, job);
+          // Armed once it's saved, so a job the agent is told failed never runs.
+          save(
+            () => jobs.set(job.id, job),
+            () => jobs.delete(job.id),
+          );
           arm(job);
-          persist();
           return result(`Scheduled: ${describe(job)}`);
         },
       }),

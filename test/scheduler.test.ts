@@ -10,8 +10,12 @@ interface Tool {
   execute(id: string, params: Record<string, unknown>): Promise<{ content: { text: string }[] }>;
 }
 
-/** The scheduler for one session, whose entries persist as JSON, as in a session file. */
+/**
+ * The scheduler for one session, whose entries persist as JSON, as in a session file. Saving fails
+ * while `saving.fails` is set.
+ */
 function start(entries: SessionEntry[] = []) {
+  const saving = { fails: false };
   const handlers = new Map<string, ((event: unknown, ctx: unknown) => unknown)[]>();
   let tool: Tool | undefined;
   const due: ScheduledJob[] = [];
@@ -20,7 +24,10 @@ function start(entries: SessionEntry[] = []) {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
     },
     registerTool: (registered: Tool) => (tool = registered),
-    appendEntry: (customType: string, data: unknown) => entries.push({ type: 'custom', customType, data: structuredClone(data) } as SessionEntry),
+    appendEntry(customType: string, data: unknown) {
+      if (saving.fails) throw new Error('ENOSPC: no space left on device');
+      entries.push({ type: 'custom', customType, data: structuredClone(data) } as SessionEntry);
+    },
   };
   const { extension, hasPendingJobs } = scheduler('r1', (job) => due.push(job));
   extension(pi as unknown as ExtensionAPI);
@@ -31,7 +38,7 @@ function start(entries: SessionEntry[] = []) {
   const schedule = async (params: Record<string, unknown>) => (await tool!.execute('call', params)).content[0]!.text;
   const create = async (interval_ms: number, prompt: string, recurring = false) =>
     /job (\w+)/.exec(await schedule({ action: 'create', interval_ms, prompt, recurring }))![1]!;
-  return { entries, tool: () => tool!, due, emit, schedule, create, hasPendingJobs };
+  return { entries, tool: () => tool!, due, emit, schedule, create, hasPendingJobs, saving };
 }
 
 test('a due job goes to the thread, and then is no longer pending', async (t) => {
@@ -139,4 +146,22 @@ test("refuses intervals Node's timers can't keep, jobs past the limit, and unkno
   await refused({ interval_ms: 60_000 }, 'This thread already has 10 scheduled jobs. Cancel one first.');
   await assert.rejects(schedule({ action: 'cancel', id: 'nope' }), { message: /There is no job nope in this thread/ });
   await emit('session_shutdown');
+});
+
+test("a job that couldn't be saved isn't scheduled, and one that comes due runs though saving fails", async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: NOW });
+  const error = t.mock.method(console, 'error', () => {});
+  const { due, emit, schedule, create, hasPendingJobs, saving } = start();
+  await emit('session_start');
+  const kept = await create(60_000, 'Kept');
+
+  saving.fails = true;
+  await assert.rejects(schedule({ action: 'create', interval_ms: 60_000, prompt: 'Lost' }), /ENOSPC/);
+  await assert.rejects(schedule({ action: 'cancel', id: kept }), /ENOSPC/);
+  assert.match(await schedule({ action: 'list' }), new RegExp(`^job ${kept}, .*: Kept$`));
+
+  t.mock.timers.tick(60_000);
+  assert.deepEqual(due, [{ id: kept, prompt: 'Kept' }]);
+  assert.equal(hasPendingJobs(), false);
+  assert.equal(error.mock.callCount(), 1);
 });
