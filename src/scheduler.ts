@@ -101,7 +101,7 @@ export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): E
         }),
 
         async execute(_toolCallId, { action, interval_ms: ms, prompt, recurring = false, id }) {
-          const result = (text: string) => ({ content: [{ type: 'text' as const, text }], details: { jobs: [...jobs.values()] } });
+          const result = (text: string) => ({ content: [{ type: 'text' as const, text }], details: { jobs: [...jobs.values()].map((job) => ({ ...job })) } });
           if (action === 'list') {
             if (!jobs.size) return result('No jobs are scheduled in this thread.');
             return result([...jobs.values()].sort((a, b) => a.expiresAt - b.expiresAt).map(describe).join('\n'));
