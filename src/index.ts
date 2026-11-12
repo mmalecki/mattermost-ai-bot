@@ -16,7 +16,7 @@ const agent = await createAgent(config, mattermost.botUsername);
 const threads = new Threads(agent, mattermost, {
   botUserId: mattermost.botUserId,
   allowedUsers: config.tools.allowedUsers,
-  idleMs: 15 * 60_000,
+  idleMs: config.idleMs,
   pickModel: config.pickModel,
 });
 mattermost.listen((post) => threads.handle(post));

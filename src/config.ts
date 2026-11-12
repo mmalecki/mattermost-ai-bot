@@ -32,6 +32,8 @@ export interface Config {
   appendSystemPromptPath: string;
   /** Thread sessions and pi's own state live here. */
   dataDir: string;
+  /** Idle thread sessions are closed after this long, unless they have scheduled jobs pending. */
+  idleMs: number;
 }
 
 export interface ToolsConfig {
@@ -103,6 +105,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // pi's name for instructions added to its system prompt, kept next to the tools they're about.
     appendSystemPromptPath: join(dirname(mcpConfig), 'APPEND_SYSTEM.md'),
     dataDir: resolve(env.DATA_DIR || 'data'),
+    idleMs: 15 * 60_000,
   };
 }
 
