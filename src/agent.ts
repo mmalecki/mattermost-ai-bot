@@ -19,7 +19,7 @@ import { type Config, type ModelChoice, parseModel } from './config.ts';
 import { errorMessage } from './error.ts';
 import { loadScheduler, type ScheduledJob, scheduler } from './scheduler.ts';
 import { type ImageFiles, imageFiles } from './images.ts';
-import { type ImageStore, imageGeneration, mcpImages, mcpNamespace, mcpServers, toolGuard, toolImages, withoutCwd } from './tools.ts';
+import { type ImageStore, imageGeneration, mcpImages, mcpNamespace, mcpServers, threadPrompt, toolGuard, toolImages } from './tools.ts';
 import { imageCrop, VISION_TOOLS, vision } from './vision.ts';
 
 // Published as TypeScript, which Node won't strip under node_modules, so pi loads it like any
@@ -191,6 +191,16 @@ export async function createAgent(config: Config, botUsername: string): Promise<
       const sessionManager = SessionManager.open(sessionFile(rootId), threadDir(rootId), config.dataDir);
       const { model, thinkingLevel } = sessionModel(rootId, sessionManager, choice);
       const images = model.input.includes('image');
+      const promptOptions = {
+        botUsername,
+        servers: config.tools.mcpServers,
+        images,
+        imageEdits,
+        imageServers: Object.fromEntries(Object.entries(serverImages).map(([name, args]) => [name, Object.keys(args)])),
+        serverUrl: config.mattermost.publicUrl,
+        rootId,
+      };
+      const prompt = (tools: ReadonlySet<string>) => buildSystemPrompt({ ...promptOptions, tools });
       const resourceLoader = new DefaultResourceLoader({
         cwd: config.dataDir,
         agentDir,
@@ -210,25 +220,15 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           // A model that sees images crops them to look closer, as pi scales them down.
           ...((images || visionModel) && imageStore ? [imageCrop(imageStore, images)] : []),
           ...((images || imageTools) && imageStore ? [toolImages(imageStore, ['generate_image', ...VISION_TOOLS]), mcpImages(serverImages, imageStore)] : []),
-          withoutCwd(),
+          threadPrompt(allowTools, prompt),
         ],
         noExtensions: true,
         noSkills: true,
         noPromptTemplates: true,
         noThemes: true,
         noContextFiles: true,
-        systemPrompt: buildSystemPrompt({
-          botUsername,
-          servers: config.tools.mcpServers,
-          scheduler: !!schedulerExtension,
-          images,
-          imageGeneration: !!imageModel,
-          imageEdits,
-          imageServers: Object.fromEntries(Object.entries(serverImages).map(([name, args]) => [name, Object.keys(args)])),
-          vision: !!visionModel,
-          serverUrl: config.mattermost.publicUrl,
-          rootId,
-        }),
+        // threadPrompt replaces it before every run, once the thread's tools are known.
+        systemPrompt: prompt(new Set()),
         // Read on every session open, so edits reach new threads. pi would take a missing path as
         // the text itself, and would look for its own APPEND_SYSTEM.md without an explicit list.
         appendSystemPrompt: existsSync(config.appendSystemPromptPath) ? [config.appendSystemPromptPath] : [],
@@ -284,17 +284,17 @@ export interface SystemPromptOptions {
   /** The bot's Mattermost username, so the model knows when it is addressed. */
   botUsername: string;
   servers: Record<string, McpServerConfig>;
-  scheduler: boolean;
+  /**
+   * The tools the thread has, by the names the model sees: lines about other tools, and about servers
+   * none of whose tools are here, are left out.
+   */
+  tools: ReadonlySet<string>;
   /** Whether the model takes images. */
   images: boolean;
-  /** Whether the agent has generate_image. */
-  imageGeneration: boolean;
   /** Whether generate_image takes images to change. */
   imageEdits: boolean;
   /** The MCP servers that take images by name, with the arguments they take them in. */
   imageServers: Record<string, string[]>;
-  /** Whether VISION_MODEL is set, which gives the agent locate, and look_at_image unless it sees images. */
-  vision: boolean;
   /** Where people open the server, for links. */
   serverUrl: string;
   /** The thread's root post, so its link can be given. */
@@ -302,8 +302,11 @@ export interface SystemPromptOptions {
 }
 
 export function buildSystemPrompt(options: SystemPromptOptions): string {
-  const { botUsername, servers, scheduler, images, imageGeneration, imageEdits, imageServers, vision, serverUrl, rootId } = options;
-  const imageArguments = Object.entries(imageServers).map(([name, args]) => `${mcpNamespace(name)} in ${args.join(' or ')}`);
+  const { botUsername, servers, tools, images, imageEdits, imageServers, serverUrl, rootId } = options;
+  const has = (tool: string) => tools.has(tool);
+  const imageArguments = Object.entries(imageServers)
+    .filter(([name]) => hasServerTools(tools, name))
+    .map(([name, args]) => `${mcpNamespace(name)} in ${args.join(' or ')}`);
   return [
     `You are @${botUsername}, a Mattermost bot that gets things done with your tools.`,
     'Each user message holds one or more Mattermost posts from a thread, as "@username (time, post <id>): text". Several people can take part in one thread.',
@@ -316,25 +319,25 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
     'If a tool call fails or is blocked, say so plainly. Never say you did something unless a tool result confirms it.',
     'Do only what you are asked. Do not take other actions on your own, such as announcing or notifying.',
     'Cite the URLs of web sources you use.',
-    ...(scheduler
+    ...(has('schedule')
       ? [
           'You only act while answering a post. To do anything later or repeatedly ("in 10 minutes", "at 6", "every morning"), call schedule: without it, nothing happens later, so never promise it. Never do it right away instead. If schedule refuses, say why and do nothing.',
           'A due job reaches you as "Scheduled job <id> is due (time): <prompt>"; do what it says, and your reply is posted to the thread.',
         ]
       : []),
-    ...(imageGeneration
+    ...(has('generate_image')
       ? ['Every image you make with generate_image is attached to your reply, in the order you made them. Do not link to them or write them out in your reply.']
       : []),
-    ...(imageGeneration && imageEdits
+    ...(has('generate_image') && imageEdits
       ? [
           'To change an image, or make one from it, pass its name to generate_image in images: one posted in the thread by the name on its [image] line, one you generated or a tool returned by the name it was saved as. Say what to change in the prompt.',
         ]
       : []),
-    ...(vision && !images ? ['To learn what is in images in this thread, ask look_at_image, by their names.'] : []),
-    // crop_image, which the agent has when it sees images, or has VISION_MODEL's tools.
-    ...(images || vision
+    // A model that sees images has no look_at_image: it looks for itself.
+    ...(has('look_at_image') ? ['To learn what is in images in this thread, ask look_at_image, by their names.'] : []),
+    ...(has('crop_image')
       ? [
-          `To ${images ? 'look closer at' : 'work on'} a part of an image, such as a barcode, a label or small text, ${vision ? 'find it with locate, and ' : ''}cut it out with crop_image, by the image's name${images ? '' : ': the new image can go to look_at_image, or to any tool that takes images'}.`,
+          `To ${images ? 'look closer at' : 'work on'} a part of an image, such as a barcode, a label or small text, ${has('locate') ? 'find it with locate, and ' : ''}cut it out with crop_image, by the image's name${images ? '' : `: the new image can go to ${has('look_at_image') ? 'look_at_image, or to ' : ''}any tool that takes images`}.`,
         ]
       : []),
     ...(imageArguments.length
@@ -342,19 +345,25 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
           `These tools take images by name, in these arguments: ${imageArguments.join('; ')}. Give the name of an image in this thread there, from its [image] line or the name it was saved as, never in another argument, and the image is passed on as the tool takes it.`,
         ]
       : []),
-    ...directServers(servers),
+    ...directServers(servers, tools),
   ].join('\n');
 }
 
 /**
- * What the servers with directly declared tools offer, from their `description`s. pi lists only the
- * other servers, in its `mcp_servers` section; this matches its format.
+ * What the servers with directly declared tools offer, from their `description`s, of those `tools` has
+ * some of. pi lists only the other servers, in its `mcp_servers` section; this matches its format.
  */
-export function directServers(servers: Record<string, McpServerConfig>): string[] {
+export function directServers(servers: Record<string, McpServerConfig>, tools: ReadonlySet<string>): string[] {
   const lines = Object.entries(servers)
-    .filter(([, config]) => config.exposure === 'direct' && config.enabled !== false && config.description?.trim())
+    .filter(([name, config]) => config.exposure === 'direct' && config.enabled !== false && config.description?.trim() && hasServerTools(tools, name))
     .map(([name, config]) => `- ${mcpNamespace(name)} (direct): ${config.description!.trim().split('\n', 1)[0]}`);
   return lines.length ? ['\nYour tools come from these MCP servers:', ...lines] : [];
+}
+
+/** Whether `tools` has some of `server`'s, which the model sees as `mcp__<server>__<tool>`. */
+function hasServerTools(tools: ReadonlySet<string>, server: string): boolean {
+  const prefix = `${mcpNamespace(server)}__`;
+  return [...tools].some((tool) => tool.startsWith(prefix));
 }
 
 /**

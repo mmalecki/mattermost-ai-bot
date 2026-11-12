@@ -9,20 +9,24 @@ import type { AssistantMessage } from '@earendil-works/pi-ai';
 import { buildSystemPrompt, createAgent, directServers, permalink } from '../src/agent.ts';
 import { loadConfig } from '../src/config.ts';
 
-test("lists what directly exposed servers offer, in the format of pi's mcp_servers section", () => {
-  assert.deepEqual(
-    directServers({
-      'home-assistant': { url: 'http://ha/api/mcp', exposure: 'direct', description: 'The home\nMore detail' },
-      docs: { url: 'http://docs/mcp', description: 'Product docs' },
-      off: { url: 'http://off/mcp', exposure: 'direct', enabled: false, description: 'Disabled' },
-      bare: { url: 'http://bare/mcp', exposure: 'direct' },
-    }),
-    ['\nYour tools come from these MCP servers:', '- mcp__home_assistant (direct): The home'],
-  );
-  assert.deepEqual(directServers({}), []);
+test("lists what directly exposed servers the thread has tools of offer, in the format of pi's mcp_servers section", () => {
+  const servers = {
+    'home-assistant': { url: 'http://ha/api/mcp', exposure: 'direct', description: 'The home\nMore detail' },
+    lights: { url: 'http://lights/mcp', exposure: 'direct', description: 'The lights' },
+    docs: { url: 'http://docs/mcp', description: 'Product docs' },
+    off: { url: 'http://off/mcp', exposure: 'direct', enabled: false, description: 'Disabled' },
+    bare: { url: 'http://bare/mcp', exposure: 'direct' },
+  } as const;
+  // mcp__lights_extra's tool is another server's, not one of mcp__lights'.
+  const tools = new Set(['mcp__home_assistant__HassTurnOn', 'mcp__lights_extra__on', 'mcp__docs__search', 'mcp__off__x', 'mcp__bare__y']);
+  assert.deepEqual(directServers(servers, tools), ['\nYour tools come from these MCP servers:', '- mcp__home_assistant (direct): The home']);
+  assert.deepEqual(directServers(servers, new Set()), []);
+  assert.deepEqual(directServers({}, tools), []);
 });
 
-const promptOptions = { botUsername: 'sailor', servers: {}, scheduler: false, images: false, imageGeneration: false, imageEdits: false, imageServers: {}, vision: false, serverUrl: 'https://chat.example', rootId: 'r1' };
+const promptOptions = { botUsername: 'sailor', servers: {}, tools: new Set<string>(), images: false, imageEdits: false, imageServers: {}, serverUrl: 'https://chat.example', rootId: 'r1' };
+/** promptOptions, with the thread having `tools`. */
+const withTools = (...tools: string[]) => ({ ...promptOptions, tools: new Set(tools) });
 
 test('links posts without their team, and gives the model the thread\'s link', () => {
   assert.equal(permalink('https://chat.example', 'p1'), 'https://chat.example/_redirect/pl/p1');
@@ -34,36 +38,51 @@ test('tells the model how images come only when it takes them', () => {
   assert.doesNotMatch(buildSystemPrompt(promptOptions), /\[image/);
 });
 
-test('tells the model its generated images are attached only when it can generate them', () => {
-  assert.match(buildSystemPrompt({ ...promptOptions, imageGeneration: true }), /generate_image is attached to your reply/);
+test('tells the model about schedule only when the thread has it', () => {
+  assert.match(buildSystemPrompt(withTools('schedule')), /call schedule/);
+  assert.doesNotMatch(buildSystemPrompt(promptOptions), /schedule/);
+});
+
+test('tells the model its generated images are attached only when the thread has generate_image', () => {
+  assert.match(buildSystemPrompt(withTools('generate_image')), /generate_image is attached to your reply/);
   assert.doesNotMatch(buildSystemPrompt(promptOptions), /generate_image/);
 });
 
-test('tells the model how to give generate_image images only when it takes them', () => {
-  assert.match(buildSystemPrompt({ ...promptOptions, imageGeneration: true, imageEdits: true }), /pass its name to generate_image in images/);
-  assert.doesNotMatch(buildSystemPrompt({ ...promptOptions, imageGeneration: true }), /pass it to generate_image/);
+test('tells the model how to give generate_image images only when it takes them, and the thread has it', () => {
+  assert.match(buildSystemPrompt({ ...withTools('generate_image'), imageEdits: true }), /pass its name to generate_image in images/);
+  assert.doesNotMatch(buildSystemPrompt(withTools('generate_image')), /pass its name to generate_image/);
+  assert.doesNotMatch(buildSystemPrompt({ ...promptOptions, imageEdits: true }), /generate_image/);
 });
 
-test('tells the model about the vision tools it has: look_at_image only when it is blind, crop_image when it sees images', () => {
-  const blind = buildSystemPrompt({ ...promptOptions, vision: true });
+test('tells the model about the vision tools the thread has', () => {
+  // A model that doesn't see images, with VISION_MODEL's tools.
+  const blind = buildSystemPrompt(withTools('look_at_image', 'locate', 'crop_image'));
   assert.match(blind, /ask look_at_image/);
-  assert.match(blind, /To work on a part of an image, .* find it with locate, and cut it out with crop_image, by the image's name: the new image can go to look_at_image/);
+  assert.match(blind, /To work on a part of an image, .* find it with locate, and cut it out with crop_image, by the image's name: the new image can go to look_at_image, or to any tool that takes images\./);
+  const withoutLookAt = buildSystemPrompt(withTools('locate', 'crop_image'));
+  assert.doesNotMatch(withoutLookAt, /look_at_image/);
+  assert.match(withoutLookAt, /cut it out with crop_image, by the image's name: the new image can go to any tool that takes images\./);
 
-  const seeing = buildSystemPrompt({ ...promptOptions, images: true, vision: true });
+  // A model that sees images has no look_at_image.
+  const seeing = buildSystemPrompt({ ...withTools('locate', 'crop_image'), images: true });
   assert.doesNotMatch(seeing, /look_at_image/);
   assert.match(seeing, /To look closer at a part of an image, .* find it with locate, and cut it out with crop_image, by the image's name\./);
-  assert.match(buildSystemPrompt({ ...promptOptions, images: true }), /To look closer at a part of an image, such as a barcode, a label or small text, cut it out with crop_image/);
+  assert.match(buildSystemPrompt({ ...withTools('crop_image'), images: true }), /To look closer at a part of an image, such as a barcode, a label or small text, cut it out with crop_image/);
 
-  assert.doesNotMatch(buildSystemPrompt(promptOptions), /look_at_image|locate|crop_image/);
+  assert.doesNotMatch(buildSystemPrompt({ ...promptOptions, images: true }), /look_at_image|locate|crop_image/);
+  assert.doesNotMatch(buildSystemPrompt(withTools('locate')), /look_at_image|locate|crop_image/);
 });
 
-test('tells the model which servers take images by name', () => {
+test('tells the model which servers the thread has tools of take images by name', () => {
+  const imageServers = { 'bar-codes': ['base64'], vision: ['image', 'url'] };
   assert.match(
-    buildSystemPrompt({ ...promptOptions, imageServers: { 'bar-codes': ['base64'], vision: ['image', 'url'] } }),
+    buildSystemPrompt({ ...withTools('mcp__bar_codes__decode', 'mcp__vision__describe'), imageServers }),
     /take images by name, in these arguments: mcp__bar_codes in base64; mcp__vision in image or url\./,
   );
-  assert.doesNotMatch(buildSystemPrompt(promptOptions), /take images by name/);
+  assert.match(buildSystemPrompt({ ...withTools('mcp__bar_codes__decode'), imageServers }), /in these arguments: mcp__bar_codes in base64\./);
+  assert.doesNotMatch(buildSystemPrompt({ ...promptOptions, imageServers }), /take images by name/);
 });
+
 
 /** An agent on `local/small`, from a models.json that also has `local/large`, which takes images. */
 const dirs: string[] = [];
@@ -71,18 +90,21 @@ after(() => dirs.forEach((dir) => rmSync(dir, { recursive: true, force: true }))
 
 /**
  * An OpenAI-compatible endpoint that answers every request with "hello", streamed as pi asks for it.
- * `models` are the models asked for, in order, and `tools` the names of the tools each request declared.
+ * `models` are the models asked for, in order, `tools` the names of the tools each request declared, and
+ * `prompts` each request's first message, the system prompt.
  */
 async function fakeLlm() {
   const models: string[] = [];
   const tools: string[][] = [];
+  const prompts: string[] = [];
   const server = createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => (body += chunk));
     req.on('end', () => {
-      const request = JSON.parse(body) as { model: string; tools?: { function: { name: string } }[] };
+      const request = JSON.parse(body) as { model: string; tools?: { function: { name: string } }[]; messages: { content: unknown }[] };
       models.push(request.model);
       tools.push((request.tools ?? []).map((t) => t.function.name));
+      prompts.push(JSON.stringify(request.messages[0]!.content));
       const chunk = (delta: object, finish: string | null) =>
         `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', created: 0, model: 'm', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
       res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -91,7 +113,7 @@ async function fakeLlm() {
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
-  return { url: `http://127.0.0.1:${port}/v1`, models, tools, close: () => server.close() };
+  return { url: `http://127.0.0.1:${port}/v1`, models, tools, prompts, close: () => server.close() };
 }
 
 /**
@@ -177,6 +199,27 @@ test('the model is declared only the tools the thread may use, which stay away u
   await reopened.prompt('and now?');
   assert.deepEqual(llm.tools[4], llm.tools[1]);
   await reopened.close();
+});
+
+test("the system prompt tells the model only about the tools the thread may use, and not pi's cwd", async (t) => {
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent } = await localAgent({ baseUrl: llm.url });
+  const imageStore = { ...agent.images('r1'), attach: () => {} };
+  let allowed = (_name: string) => true;
+  const session = await agent.openSession('r1', { model: { provider: 'local', model: 'large', thinkingLevel: 'off' }, allowTools: (name) => allowed(name), imageStore });
+  await session.prompt('hi');
+  assert.ok(llm.tools[0]!.includes('crop_image'));
+  assert.match(llm.prompts[0]!, /You are @sailor/);
+  assert.match(llm.prompts[0]!, /cut it out with crop_image/);
+  assert.doesNotMatch(llm.prompts[0]!, /<cwd>/);
+
+  allowed = (name) => name !== 'crop_image';
+  await session.prompt('crop this');
+  assert.ok(!llm.tools[1]!.includes('crop_image'));
+  assert.match(llm.prompts[1]!, /You are @sailor/);
+  assert.doesNotMatch(llm.prompts[1]!, /crop_image|<cwd>/);
+  await session.close();
 });
 
 test('VISION_MODEL gives sessions the vision tools, and must take images', async (t) => {
