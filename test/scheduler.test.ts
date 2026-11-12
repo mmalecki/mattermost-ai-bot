@@ -68,13 +68,23 @@ test('a recurring job comes due every interval until cancelled', async (t) => {
 
   const id = await create(3_600_000, 'Check the weather', true);
   assert.match(await schedule({ action: 'list' }), /, then every 1 hour: Check the weather$/);
+  const saved = entries.length;
   for (let i = 0; i < 3; i++) t.mock.timers.tick(3_600_000);
   assert.equal(due.length, 3);
-  assert.deepEqual(savedJobs(entries).map((j) => j.expiresAt), [NOW + 4 * 3_600_000]);
+  // Its runs aren't saved, as a reopened session works out its next time.
+  assert.equal(entries.length, saved);
+  await emit('session_shutdown');
 
-  assert.equal(await schedule({ action: 'cancel', id }), `Cancelled job ${id}.`);
+  const reopened = start(entries);
+  await reopened.emit('session_start');
+  t.mock.timers.tick(3_600_000 - 1);
+  assert.equal(reopened.due.length, 0);
+  t.mock.timers.tick(1);
+  assert.equal(reopened.due.length, 1);
+
+  assert.equal(await reopened.schedule({ action: 'cancel', id }), `Cancelled job ${id}.`);
   t.mock.timers.tick(3_600_000);
-  assert.equal(due.length, 3);
+  assert.equal(reopened.due.length, 1);
   assert.deepEqual(savedJobs(entries), []);
 });
 

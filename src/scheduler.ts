@@ -18,7 +18,8 @@ export interface Job extends ScheduledJob {
 }
 
 /**
- * The session entry with a snapshot of the thread's pending jobs, appended on every change. The bot
+ * The session entry with a snapshot of the thread's pending jobs, appended whenever one is made, runs
+ * out or is cancelled, though not when a recurring one moves on to its next time. The bot
  * used pi-ate-scheduler before, whose snapshots look the same, but also list the jobs that are done,
  * by their `status`, so threads that have them keep their jobs.
  */
@@ -71,16 +72,17 @@ export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): T
       if (job.expiresAt > Date.now()) return void arm(job);
       timers.delete(job.id);
       if (job.recurring) {
+        // Not saved: a reopened session works out its next time from any earlier one.
         advance(job, Date.now());
         arm(job);
       } else {
         jobs.delete(job.id);
-      }
-      // In a timer, where an error would end the bot. The job runs all the same.
-      try {
-        persist();
-      } catch (error) {
-        console.error(`Thread ${rootId}: saving its scheduled jobs failed:`, error);
+        // In a timer, where an error would end the bot. The job runs all the same.
+        try {
+          persist();
+        } catch (error) {
+          console.error(`Thread ${rootId}: saving its scheduled jobs failed:`, error);
+        }
       }
       onDue({ id: job.id, prompt: job.prompt });
     };
