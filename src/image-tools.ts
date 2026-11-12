@@ -31,10 +31,7 @@ export function imageGeneration(models: Pick<ModelRuntime, 'generateImages'>, mo
         }),
         annotations: { openWorldHint: true },
         // Small models often send a single image as a string. Validation follows.
-        prepareArguments(args) {
-          const input = args as { images?: unknown };
-          return (typeof input?.images === 'string' ? { ...input, images: [input.images] } : input) as never;
-        },
+        prepareArguments: (args) => withList(args, 'images'),
 
         async execute(_toolCallId, params, signal) {
           const { prompt, images: names = [] } = params as { prompt: string; images?: string[] };
@@ -83,4 +80,10 @@ export function toolImages(store: ImageFiles, ownTools: string[]): ExtensionFact
       };
     });
   };
+}
+
+/** `args` with its `key` as a list, when sent as a single string, for a tool's `prepareArguments`. */
+export function withList(args: unknown, key: string): never {
+  const input = args as Record<string, unknown> | undefined;
+  return (typeof input?.[key] === 'string' ? { ...input, [key]: [input[key]] } : input) as never;
 }

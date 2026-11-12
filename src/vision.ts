@@ -3,6 +3,7 @@ import { defineTool, type ExtensionFactory, type ModelRuntime, resizeImage } fro
 import photon from '@silvia-odwyer/photon-node';
 import type { ModelChoice } from './config.ts';
 import { textOf } from './content.ts';
+import { withList } from './image-tools.ts';
 import type { ImageFiles } from './images.ts';
 
 /** The vision tools, which keep the images they make themselves. */
@@ -145,12 +146,6 @@ export function imageCrop(store: ImageFiles, seesImages: boolean): ExtensionFact
       }),
     );
   };
-}
-
-/** `args` with its `key` as a list, when sent as a single string. */
-function withList(args: unknown, key: string): never {
-  const input = args as Record<string, unknown> | undefined;
-  return (typeof input?.[key] === 'string' ? { ...input, [key]: [input[key]] } : input) as never;
 }
 
 /**
