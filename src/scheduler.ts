@@ -156,7 +156,10 @@ export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): T
           }
           if (!prompt?.trim()) throw new Error('prompt must say what to do when the job is due.');
           if (jobs.size >= MAX_JOBS) throw new Error(`This thread already has ${MAX_JOBS} scheduled jobs. Cancel one first.`);
-          const job: Job = { id: randomBytes(4).toString('hex'), prompt, intervalMs: ms, recurring, expiresAt: Date.now() + ms };
+          let jobId: string;
+          do jobId = randomBytes(4).toString('hex');
+          while (jobs.has(jobId));
+          const job: Job = { id: jobId, prompt, intervalMs: ms, recurring, expiresAt: Date.now() + ms };
           // Armed once it's saved, so a job the agent is told failed never runs.
           save(
             () => jobs.set(job.id, job),
