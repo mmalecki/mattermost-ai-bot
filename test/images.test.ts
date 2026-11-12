@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { imageFiles } from '../src/images.ts';
+import { imageFiles, isImageName } from '../src/images.ts';
 
 const PNG = { type: 'image' as const, data: Buffer.from('png').toString('base64'), mimeType: 'image/png' };
 const JPEG = { type: 'image' as const, data: Buffer.from('jpeg').toString('base64'), mimeType: 'image/jpeg' };
@@ -49,5 +49,12 @@ test('gets only images kept in the directory, by the names they were kept under'
   // As well as image data given in place of a name, which MCP servers' image arguments may hold.
   for (const name of ['nope.png', 'notes.txt', '../images/garage.png', '.', '', 'iVBORw0KGgo/AAA+.png', 'data:image/png;base64,cG5n']) {
     await assert.rejects(files.get([name]), { message: `${name} is not an image in this thread: give the name on an [image] line, or of an image you generated or a tool returned` });
+  }
+});
+
+test('tells what could name an image from anything else, such as image data', () => {
+  for (const name of ['garage.png', 'Scan 2.JPEG', 'image-2.webp']) assert.equal(isImageName(name), true, name);
+  for (const name of ['notes.txt', 'a/garage.png', '.png', 'data:image/png;base64,cG5n', `${'A'.repeat(1_000_000)}==`]) {
+    assert.equal(isImageName(name), false, name.slice(0, 40));
   }
 });

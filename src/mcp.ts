@@ -1,7 +1,7 @@
 import type { ExtensionFactory, McpServerConfig } from '@earendil-works/pi-coding-agent';
 import type { ImageArguments, ImageForm } from './config.ts';
 import { errorMessage } from './error.ts';
-import type { ImageFiles } from './images.ts';
+import { type ImageFiles, isImageName } from './images.ts';
 
 /**
  * Registers the configured MCP servers with pi's MCP extension, which validates each config and
@@ -47,9 +47,10 @@ async function replaceImages(value: unknown, args: ImageArguments, store: ImageF
       // An image argument, or a list in one.
       const itemForm = typeof key === 'string' && Object.hasOwn(args, key) ? args[key] : form;
       if (typeof item !== 'string') return replaceImages(item, args, store, itemForm);
-      if (!itemForm) return;
-      // Anything but the name of one of the thread's images is left as it is, such as data already
-      // given: the store refuses it, without looking for a file unless it could be an image's name.
+      // Only in an image argument, and only what could name an image: anything else, such as image
+      // data already given, which may be large, is left as it is.
+      if (!itemForm || !isImageName(item)) return;
+      // As is a name the thread has no image under.
       const image = await imageIn(store, item, itemForm).catch(() => undefined);
       if (image !== undefined) (value as Record<string | number, unknown>)[key] = image;
     }),

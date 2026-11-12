@@ -55,10 +55,9 @@ export interface ImageStore extends ImageFiles {
 /** The images kept in `dir`, which is created once one is. */
 export function imageFiles(dir: string): ImageFiles {
   const path = async (name: string) => {
-    const file = join(dir, name);
     // Only names save() could have given, so a name can't reach outside the directory.
-    const ok = name === safeName(name) && IMAGE_TYPES[extname(name).toLowerCase()];
-    if (!ok || !(await isFile(file))) {
+    const file = isImageName(name) ? join(dir, name) : undefined;
+    if (!file || !(await isFile(file))) {
       throw new Error(`${name} is not an image in this thread: give the name on an [image] line, or of an image you generated or a tool returned`);
     }
     return file;
@@ -88,6 +87,14 @@ export function imageFiles(dir: string): ImageFiles {
       ),
     path,
   };
+}
+
+/**
+ * Whether `name` could name one of a thread's images: it's a name save() could have given. Quick to
+ * say no to anything else, such as image data given in its place, which may be large.
+ */
+export function isImageName(name: string): boolean {
+  return !!IMAGE_TYPES[extname(name).toLowerCase()] && name === safeName(name);
 }
 
 /**
