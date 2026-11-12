@@ -60,6 +60,19 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
+      # The image for this machine, run as it's started: every module loads, and it stops only for want
+      # of configuration.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: mattermost-ai-bot:test
+          cache-from: type=gha
+      - name: Image works
+        run: |
+          if out=$(docker run --rm mattermost-ai-bot:test 2>&1); then echo "$out"; exit 1; fi
+          echo "$out"
+          grep -q 'MATTERMOST_URL is not set' <<< "$out"
       - uses: docker/build-push-action@v7
         with:
           context: .

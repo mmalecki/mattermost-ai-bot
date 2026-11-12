@@ -267,7 +267,7 @@ npm start
 ```
 
 `npm test` runs the tests, `npm run typecheck` checks types. Both, and `npm start`, run the TypeScript sources
-directly; `npm run build` compiles them to `dist/`, which the npm package runs, and `npm pack` builds first.
+directly; `npm run build` compiles them to `dist/`, which the npm package and the Docker image run, and `npm pack` builds first.
 
 On first `SIGINT` or `SIGTERM`, the bot stops handling new posts and exits once running threads finish their current run.
 Second signal exits at once.
