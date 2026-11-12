@@ -172,17 +172,18 @@ letters, digits and `_` in the server's name turned into `_`. The others are `we
 `codemode` and `deferred` exposure are reached through. Tools called from `codemode` scripts are checked one by one
 too, but scripts can also use models, so give `codemode` only to those trusted with the rest.
 
-The model is shown only the tools the thread may use. Tools taken away in a thread that `allowedUsers` gives back later
-are shown again once its session is reopened, after it idles out or the bot restarts. `codemode` and `tool_search`
-still list every tool they reach, and calls to those that aren't allowed are blocked, as are calls to any other tool
-the model knows of.
+The model is shown only the tools the thread may use, and the system prompt tells it how to use only those. Tools taken
+away in a thread that `allowedUsers` gives back later are shown again once its session is reopened, after it idles out
+or the bot restarts. `codemode` and `tool_search` still list every tool they reach, and calls to those that aren't
+allowed are blocked, as are calls to any other tool the model knows of.
 
 Values such as `${HASS_TOKEN}` are read from the environment, so secrets can stay in `.env`. As in Pi, a server's
 `exposure` defaults to `codemode`, where the model reaches its tools through scripts; `direct` declares them to the model
 like the built-in tools, which suits small models and small servers best. `codemode` is on only while some server has
 `codemode` exposure, unless `CODEMODE=true`: then scripts can call every tool, `direct` ones and the built-in web tools
 included, to run calls in parallel or cut down large results. The `description` of every enabled server is
-shown to the model, whatever its exposure. `mcp.example.json` is a starting point.
+shown to the model, whatever its exposure, though a `direct` server's only while the thread may use some of its tools.
+`mcp.example.json` is a starting point.
 
 #### Images for MCP servers
 A server's tools can take the thread's images, which the agent gives them by name, as it does `generate_image`, with
