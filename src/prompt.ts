@@ -1,6 +1,6 @@
 // The system prompt: what the bot tells the model of itself, its thread, and the tools it has there.
 import type { ExtensionFactory, McpServerConfig } from '@earendil-works/pi-coding-agent';
-import { mcpNamespace } from './tools.ts';
+import { mcpNamespace } from './mcp.ts';
 
 export interface SystemPromptOptions {
   /** The bot's Mattermost username, so the model knows when it is addressed. */

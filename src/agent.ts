@@ -16,10 +16,12 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import { type Config, type ModelChoice, parseModel } from './config.ts';
 import { errorMessage } from './error.ts';
-import { type ScheduledJob, scheduler } from './scheduler.ts';
+import { toolGuard } from './guard.ts';
+import { imageGeneration, toolImages } from './image-tools.ts';
 import { imageFiles, ThreadImages } from './images.ts';
+import { mcpImages, mcpServers } from './mcp.ts';
 import { buildSystemPrompt, threadPrompt } from './prompt.ts';
-import { imageGeneration, mcpImages, mcpServers, toolGuard, toolImages } from './tools.ts';
+import { type ScheduledJob, scheduler } from './scheduler.ts';
 import { imageCrop, VISION_TOOLS, vision } from './vision.ts';
 
 // Published as TypeScript, which Node won't strip under node_modules, so pi loads it like any
