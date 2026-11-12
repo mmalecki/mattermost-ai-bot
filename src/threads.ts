@@ -5,7 +5,7 @@ import type { AllowedUsers, ModelChoice } from './config.ts';
 import { textOf } from './content.ts';
 import { errorMessage } from './error.ts';
 import { download, imageSource } from './images.ts';
-import { pendingJobs, type ScheduledJob } from './scheduler.ts';
+import type { ScheduledJob } from './scheduler.ts';
 import { formatTime } from './time.ts';
 
 export interface ThreadsOptions {
@@ -332,7 +332,7 @@ class Thread {
     clearTimeout(this.#idleTimer);
     this.#idleTimer = setTimeout(() => {
       // Scheduled jobs live in the session, so it stays open while it has some.
-      if (this.#session && pendingJobs(this.#session.entries()).length) return this.#scheduleIdle();
+      if (this.#session?.hasPendingJobs()) return this.#scheduleIdle();
       this.#retire();
     }, this.#context.options.idleMs);
     this.#idleTimer.unref();

@@ -64,6 +64,8 @@ export interface ThreadSession {
   readonly images: ThreadImages;
   /** Whether posts' images are kept in `images`: when the model or some tool takes them. */
   readonly keepsImages: boolean;
+  /** Whether the thread has scheduled jobs still to come due, which keep the session open. */
+  hasPendingJobs(): boolean;
   /** The conversation so far. */
   readonly messages: readonly AgentMessage[];
   /** Runs the agent on `text`, with `images`, until it is done answering. */
@@ -190,6 +192,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
       const images = model.input.includes('image');
       const imageStore = new ThreadImages(imageFiles(join(threadDir(rootId), 'images')));
       const keepsImages = images || imageTools;
+      const jobs = config.scheduler ? scheduler(rootId, onScheduled) : undefined;
       const promptOptions = {
         botUsername,
         servers: config.tools.mcpServers,
@@ -213,7 +216,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           createCodemodeExtension(),
           createToolSearchExtension(),
           toolGuard(allowTools),
-          ...(config.scheduler ? [scheduler(rootId, onScheduled)] : []),
+          ...(jobs ? [jobs.extension] : []),
           ...(imageModel ? [imageGeneration(modelRuntime, imageModel, imageStore)] : []),
           ...(visionModel ? [vision(modelRuntime, visionModel, config.visionModel!.thinkingLevel, imageStore, images)] : []),
           // A model that sees images crops them to look closer, as pi scales them down.
@@ -265,6 +268,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
         takesImages: images,
         images: imageStore,
         keepsImages,
+        hasPendingJobs: () => jobs?.hasPendingJobs() ?? false,
         get messages() {
           return session.messages;
         },

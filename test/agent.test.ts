@@ -254,19 +254,27 @@ test("closing a session shuts its extensions down, which closes its MCP servers'
   await until(() => existsSync(join(dir, 'stopped')));
 });
 
-test("a reopened session's scheduled jobs come due again", async (t) => {
+test("a reopened session's scheduled jobs come due again, and keep it open only while the scheduler is on", async (t) => {
   const llm = await fakeLlm();
   t.after(llm.close);
-  const { agent } = await localAgent({ baseUrl: llm.url, env: { SCHEDULER: 'true' } });
+  const { agent, dir } = await localAgent({ baseUrl: llm.url, env: { SCHEDULER: 'true' } });
   // pi writes the session file once it's prompted.
   const first = await open(agent, 'r1');
   await first.prompt('hi');
-  first.appendEntry('scheduler', { timers: [{ id: 'j1', prompt: 'Check the garage', intervalMs: 1_000, recurring: false, expiresAt: Date.now() + 1_000 }] });
+  first.appendEntry('scheduler', { timers: [{ id: 'j1', prompt: 'Check the garage', intervalMs: 5_000, recurring: false, expiresAt: Date.now() + 3_000 }] });
   await first.close();
+
+  // Without the scheduler, the job never comes due, so it doesn't keep the session open.
+  const { agent: unscheduled } = await localAgent({ baseUrl: llm.url, dir });
+  const plain = await open(unscheduled, 'r1');
+  assert.equal(plain.hasPendingJobs(), false);
+  await plain.close();
 
   const due: ScheduledJob[] = [];
   const reopened = await open(agent, 'r1', { onScheduled: (job) => due.push(job) });
+  assert.equal(reopened.hasPendingJobs(), true);
   await until(() => due.length > 0);
   assert.deepEqual(due, [{ id: 'j1', prompt: 'Check the garage' }]);
+  assert.equal(reopened.hasPendingJobs(), false);
   await reopened.close();
 });

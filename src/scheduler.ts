@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { Type } from '@earendil-works/pi-ai';
-import { type CustomEntry, defineTool, type ExtensionFactory, type SessionEntry } from '@earendil-works/pi-coding-agent';
+import { type CustomEntry, defineTool, type ExtensionAPI, type ExtensionFactory, type SessionEntry } from '@earendil-works/pi-coding-agent';
 import { formatTime } from './time.ts';
 
 /** A scheduled job that is due: its id, and the prompt it was set up with. */
@@ -32,17 +32,25 @@ const MIN_RECURRING_MS = 60_000;
 const MAX_INTERVAL_MS = 2 ** 31 - 1;
 const MAX_JOBS = 10;
 
+/** A thread's scheduled jobs: the extension with the `schedule` tool, and whether any are pending. */
+export interface ThreadScheduler {
+  extension: ExtensionFactory;
+  /** Whether the thread has jobs still to come due. */
+  hasPendingJobs(): boolean;
+}
+
 /**
  * The `schedule` tool, for the thread `rootId`: jobs that give the agent a prompt later, once or every
  * so often. A due job goes to `onDue`, which runs it like posts are run. Jobs are kept in the session
  * file, and taken up again when the session is reopened: a recurring one that came due meanwhile at
  * its next time, a one-off one not at all, as it's late for whatever it was meant to do.
  */
-export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): ExtensionFactory {
-  return (pi) => {
-    const jobs = new Map<string, Job>();
-    const timers = new Map<string, NodeJS.Timeout>();
+export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): ThreadScheduler {
+  const jobs = new Map<string, Job>();
+  const timers = new Map<string, NodeJS.Timeout>();
+  return { extension, hasPendingJobs: () => jobs.size > 0 };
 
+  function extension(pi: ExtensionAPI): void {
     // Copies, as pi keeps the entry, and the jobs change.
     const persist = () => pi.appendEntry(SNAPSHOT_ENTRY, { timers: [...jobs.values()].map((job) => ({ ...job })) });
     const arm = (job: Job) => timers.set(job.id, setTimeout(() => fire(job), Math.max(0, job.expiresAt - Date.now())));
@@ -70,7 +78,7 @@ export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): E
       jobs.clear();
       const now = Date.now();
       let changed = false;
-      for (const job of pendingJobs(ctx.sessionManager.getEntries())) {
+      for (const job of savedJobs(ctx.sessionManager.getEntries())) {
         if (job.expiresAt <= now) {
           changed = true;
           if (!job.recurring) {
@@ -82,7 +90,6 @@ export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): E
         jobs.set(job.id, job);
         arm(job);
       }
-      // Otherwise the dropped jobs would still count as pending, and keep the session open.
       if (changed) persist();
     });
     pi.on('session_shutdown', disarm);
@@ -134,11 +141,11 @@ export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): E
         },
       }),
     );
-  };
+  }
 }
 
-/** The jobs the thread has pending, from the session's latest snapshot of them. */
-export function pendingJobs(entries: SessionEntry[]): Job[] {
+/** The jobs the thread had pending, as the session's latest snapshot of them saved them. */
+export function savedJobs(entries: SessionEntry[]): Job[] {
   const latest = entries.findLast((e) => e.type === 'custom' && e.customType === SNAPSHOT_ENTRY) as Snapshot | undefined;
   return (latest?.data?.timers ?? [])
     .filter((job) => (job.status ?? 'active') === 'active')

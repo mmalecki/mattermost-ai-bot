@@ -73,6 +73,8 @@ interface FakeSession {
   entries: unknown[];
   onScheduled: (job: ScheduledJob) => void;
   imageStore: ImageStore;
+  /** Whether the session says it has scheduled jobs pending. */
+  pendingJobs: boolean;
   closed: boolean;
 }
 
@@ -107,7 +109,7 @@ function fakeAgent(answer: Answer, images: boolean, imageTools: boolean, closing
       events.push(`open ${rootId}`);
       const imageStore = new ThreadImages(imageFiles(join(dir, rootId, 'images')));
       const entries: unknown[] = [];
-      const record: FakeSession = { model, prompts: [], images: [], allowed: [], tools: [], entries, onScheduled, imageStore, closed: false };
+      const record: FakeSession = { model, prompts: [], images: [], allowed: [], tools: [], entries, onScheduled, imageStore, pendingJobs: false, closed: false };
       sessions.set(rootId, record);
       const messages: unknown[] = [];
       const session: ThreadSession = {
@@ -115,6 +117,7 @@ function fakeAgent(answer: Answer, images: boolean, imageTools: boolean, closing
         takesImages: images,
         images: imageStore,
         keepsImages: images || imageTools,
+        hasPendingJobs: () => record.pendingJobs,
         get messages() {
           return messages as ThreadSession['messages'];
         },
@@ -548,16 +551,11 @@ test('a thread stays open while its session has scheduled jobs pending', async (
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'remind me in 2 hours'), { id: 'r1', direct: true }));
   await threads.idle();
   const session = sessions.get('r1')!;
-  const snapshot = (status: string) => ({
-    type: 'custom',
-    customType: 'scheduler',
-    data: { timers: [{ id: 'j1', prompt: 'Remind', status, expiresAt: Date.now() + 2 * 3_600_000 }] },
-  });
 
-  session.entries.push(snapshot('active'));
+  session.pendingJobs = true;
   t.mock.timers.tick(60_000);
   assert.equal(session.closed, false);
-  session.entries.push(snapshot('cancelled'));
+  session.pendingJobs = false;
   t.mock.timers.tick(60_000);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(session.closed, true);

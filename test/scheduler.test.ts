@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ExtensionAPI, SessionEntry } from '@earendil-works/pi-coding-agent';
-import { pendingJobs, type ScheduledJob, scheduler } from '../src/scheduler.ts';
+import { savedJobs, type ScheduledJob, scheduler } from '../src/scheduler.ts';
 
 const NOW = Date.UTC(2026, 9, 25, 16);
 
@@ -22,7 +22,8 @@ function start(entries: SessionEntry[] = []) {
     registerTool: (registered: Tool) => (tool = registered),
     appendEntry: (customType: string, data: unknown) => entries.push({ type: 'custom', customType, data: structuredClone(data) } as SessionEntry),
   };
-  scheduler('r1', (job) => due.push(job))(pi as unknown as ExtensionAPI);
+  const { extension, hasPendingJobs } = scheduler('r1', (job) => due.push(job));
+  extension(pi as unknown as ExtensionAPI);
 
   const emit = async (type: string) => {
     for (const handler of handlers.get(type) ?? []) await handler({ type }, { sessionManager: { getEntries: () => entries } });
@@ -30,23 +31,26 @@ function start(entries: SessionEntry[] = []) {
   const schedule = async (params: Record<string, unknown>) => (await tool!.execute('call', params)).content[0]!.text;
   const create = async (interval_ms: number, prompt: string, recurring = false) =>
     /job (\w+)/.exec(await schedule({ action: 'create', interval_ms, prompt, recurring }))![1]!;
-  return { entries, tool: () => tool!, due, emit, schedule, create };
+  return { entries, tool: () => tool!, due, emit, schedule, create, hasPendingJobs };
 }
 
 test('a due job goes to the thread, and then is no longer pending', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: NOW });
-  const { tool, due, emit, schedule, create, entries } = start();
+  const { tool, due, emit, schedule, create, entries, hasPendingJobs } = start();
   await emit('session_start');
   assert.match(tool().description, /schedules a job in this thread/i);
+  assert.equal(hasPendingJobs(), false);
 
   const id = await create(120_000, 'Check the garage');
-  assert.deepEqual(pendingJobs(entries).map((j) => j.id), [id]);
+  assert.deepEqual(savedJobs(entries).map((j) => j.id), [id]);
+  assert.equal(hasPendingJobs(), true);
   assert.match(await schedule({ action: 'list' }), new RegExp(`^job ${id}, due 2026-10-25 \\d\\d:02 GMT[+-]?\\d*: Check the garage$`));
   t.mock.timers.tick(119_000);
   assert.deepEqual(due, []);
   t.mock.timers.tick(1_000);
   assert.deepEqual(due, [{ id, prompt: 'Check the garage' }]);
-  assert.deepEqual(pendingJobs(entries), []);
+  assert.deepEqual(savedJobs(entries), []);
+  assert.equal(hasPendingJobs(), false);
   assert.equal(await schedule({ action: 'list' }), 'No jobs are scheduled in this thread.');
 });
 
@@ -59,12 +63,12 @@ test('a recurring job comes due every interval until cancelled', async (t) => {
   assert.match(await schedule({ action: 'list' }), /, then every 1 hour: Check the weather$/);
   for (let i = 0; i < 3; i++) t.mock.timers.tick(3_600_000);
   assert.equal(due.length, 3);
-  assert.deepEqual(pendingJobs(entries).map((j) => j.expiresAt), [NOW + 4 * 3_600_000]);
+  assert.deepEqual(savedJobs(entries).map((j) => j.expiresAt), [NOW + 4 * 3_600_000]);
 
   assert.equal(await schedule({ action: 'cancel', id }), `Cancelled job ${id}.`);
   t.mock.timers.tick(3_600_000);
   assert.equal(due.length, 3);
-  assert.deepEqual(pendingJobs(entries), []);
+  assert.deepEqual(savedJobs(entries), []);
 });
 
 test('a reopened session gets back its pending jobs, but not cancelled ones', async (t) => {
@@ -100,7 +104,7 @@ test("after a restart, a one-off job that came due is dropped, and a recurring o
   const reopened = start(first.entries);
   await reopened.emit('session_start');
   assert.equal(warn.mock.callCount(), 1);
-  assert.deepEqual(pendingJobs(reopened.entries).map((j) => [j.id, j.expiresAt]), [[daily, NOW + 3 * 86_400_000]]);
+  assert.deepEqual(savedJobs(reopened.entries).map((j) => [j.id, j.expiresAt]), [[daily, NOW + 3 * 86_400_000]]);
   t.mock.timers.tick(0.5 * 86_400_000);
   assert.deepEqual(reopened.due, [{ id: daily, prompt: 'Every day at this time' }]);
 });
