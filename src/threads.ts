@@ -1,8 +1,7 @@
-import type { AssistantMessage, ImageContent } from '@earendil-works/pi-ai';
-import type { Agent, ThreadSession } from './agent.ts';
+import type { ImageContent } from '@earendil-works/pi-ai';
+import type { Agent, RunOutcome, ThreadSession } from './agent.ts';
 import type { Chat, IncomingPost, PostFile, ThreadPost } from './chat.ts';
 import type { AllowedUsers, ModelChoice } from './config.ts';
-import { textOf } from './content.ts';
 import { errorMessage } from './error.ts';
 import { download, imageSource } from './images.ts';
 import type { ScheduledJob } from './scheduler.ts';
@@ -315,13 +314,11 @@ class Thread {
   }
 
   async #answer(session: ThreadSession, prompt: string, images: ImageContent[] = []): Promise<void> {
-    const startedAt = Date.now();
     session.images.startRun();
-    await session.prompt(prompt, images);
-    const reply = replyText(session, startedAt);
+    const outcome = await session.prompt(prompt, images);
+    const reply = replyText(outcome);
     const files = await session.images.takeAttached();
-    // pi drops an answer cut off at the output limit to compact and retry, and the retry may not happen.
-    if (reply === NO_ANSWER) console.warn(`Thread ${this.#rootId}: the run added no answer`);
+    if (outcome.stop === 'no answer') console.warn(`Thread ${this.#rootId}: the run added no answer`);
     if (reply || files.length) {
       await this.#context.chat.reply(this.#channelId, this.#rootId, reply ?? '', files);
     }
@@ -386,21 +383,16 @@ export function formatJob(job: ScheduledJob, now: number): string {
   return `Scheduled job ${job.id} is due (${formatTime(now)}): ${job.prompt}`;
 }
 
-const NO_ANSWER = "Sorry, I couldn't come up with an answer.";
-
-/**
- * The text of the final answer of the run started at `startedAt`, or what went wrong. Messages are
- * stamped with when their request started, so an earlier run's answer is never taken for this one's.
- */
-function replyText(session: ThreadSession, startedAt: number): string | undefined {
-  const message = session.messages.findLast((m) => m.role === 'assistant') as AssistantMessage | undefined;
-  if (!message || !(message.timestamp >= startedAt)) return NO_ANSWER;
-  if (message.stopReason === 'error' || message.stopReason === 'aborted') {
-    return `Sorry, I couldn't finish: ${message.errorMessage ?? message.stopReason}`;
+/** What's posted for how a run ended: its answer, or what went wrong. Nothing, for an empty answer. */
+function replyText(outcome: RunOutcome): string | undefined {
+  switch (outcome.stop) {
+    case 'answered':
+      return outcome.text || undefined;
+    case 'cut off':
+      return outcome.text ? `${outcome.text}\n\n_(Cut off at the output limit.)_` : "Sorry, I couldn't finish: I reached the output limit.";
+    case 'failed':
+      return `Sorry, I couldn't finish: ${outcome.error}`;
+    case 'no answer':
+      return "Sorry, I couldn't come up with an answer.";
   }
-  const text = textOf(message.content).trim();
-  if (message.stopReason === 'length') {
-    return text ? `${text}\n\n_(Cut off at the output limit.)_` : "Sorry, I couldn't finish: I reached the output limit.";
-  }
-  return text || undefined;
 }

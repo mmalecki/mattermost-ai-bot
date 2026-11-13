@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import type { ImageContent } from '@earendil-works/pi-ai';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
-import type { Agent, ThreadSession } from '../src/agent.ts';
+import type { Agent, RunOutcome, ThreadSession } from '../src/agent.ts';
 import { type ModelChoice, parseAllowedUsers, parseModel } from '../src/config.ts';
 import { type ImageStore, imageFiles, ThreadImages } from '../src/images.ts';
 import type { ScheduledJob } from '../src/scheduler.ts';
@@ -58,7 +58,8 @@ class FakeChat implements Chat {
   typing() {}
 }
 
-type Reply = string | { text: string; stopReason: string } | null;
+/** An answer's text, or how the run ended. */
+type Reply = string | RunOutcome;
 type Answer = (prompt: string) => Promise<Reply> | Reply;
 
 interface FakeSession {
@@ -85,8 +86,7 @@ const MODEL: ModelChoice = { provider: 'local', model: 'default', thinkingLevel:
 const TOOLS = ['websearch', 'mcp__parcels__add_observations', 'mcp__parcels__read_graph', 'mcp__home__HassTurnOn'];
 
 /**
- * An agent whose sessions answer each prompt with `answer(prompt)`, fail when it throws, and add no
- * message for `null`. An answer may give its stop reason. Its providers are `anthropic` and `local`,
+ * An agent whose sessions answer each prompt with `answer(prompt)`, and fail when it throws. Its providers are `anthropic` and `local`,
  * which have every model but `missing`. Closing a session waits for `closing`, when given. Threads'
  * images are kept in a directory of their own.
  */
@@ -111,16 +111,13 @@ function fakeAgent(answer: Answer, images: boolean, imageTools: boolean, closing
       const entries: unknown[] = [];
       const record: FakeSession = { model, prompts: [], images: [], allowed: [], tools: [], entries, onScheduled, imageStore, pendingJobs: false, closed: false };
       sessions.set(rootId, record);
-      const messages: unknown[] = [];
       const session: ThreadSession = {
         model: model ?? MODEL,
         takesImages: images,
         images: imageStore,
         keepsImages: images || imageTools,
         hasPendingJobs: () => record.pendingJobs,
-        get messages() {
-          return messages as ThreadSession['messages'];
-        },
+        messages: [],
         async prompt(text, images = []) {
           prompted.add(rootId);
           record.prompts.push(text);
@@ -128,12 +125,10 @@ function fakeAgent(answer: Answer, images: boolean, imageTools: boolean, closing
           record.allowed.push(allowTools('websearch'));
           record.tools.push(TOOLS.filter(allowTools));
           try {
-            const timestamp = Date.now();
             const reply = await answer(text);
-            const { text: answered, stopReason } = typeof reply === 'string' ? { text: reply, stopReason: 'stop' } : (reply ?? {});
-            if (reply !== null) messages.push({ role: 'assistant', stopReason, timestamp, content: [{ type: 'text', text: answered }] });
+            return typeof reply === 'string' ? { stop: 'answered', text: reply } : reply;
           } catch (error) {
-            messages.push({ role: 'assistant', stopReason: 'error', timestamp: Date.now(), errorMessage: (error as Error).message, content: [] });
+            return { stop: 'failed', error: (error as Error).message };
           }
         },
         abort: async () => {},
@@ -445,12 +440,10 @@ test('a failed run is reported in the thread', async () => {
   await threads.close();
 });
 
-test("a run that adds no answer says so, and doesn't post the previous one again", async (t) => {
-  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 25, 16) });
-  const { chat, threads } = setup({ answer: (prompt) => (prompt.includes('first') ? 'ok' : null) });
+test('a run that adds no answer says so', async (t) => {
+  const { chat, threads } = setup({ answer: (prompt) => (prompt.includes('first') ? 'ok' : { stop: 'no answer' }) });
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'first'), { id: 'r1', direct: true }));
   await threads.idle();
-  t.mock.timers.tick(1_000);
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'second')));
   t.mock.method(console, 'warn', () => {});
   await threads.idle();
@@ -459,7 +452,7 @@ test("a run that adds no answer says so, and doesn't post the previous one again
 });
 
 test('an answer cut off at the output limit says so', async () => {
-  const { chat, threads } = setup({ answer: (prompt) => ({ text: prompt.includes('long') ? 'Part of it' : '', stopReason: 'length' }) });
+  const { chat, threads } = setup({ answer: (prompt) => ({ stop: 'cut off', text: prompt.includes('long') ? 'Part of it' : '' }) });
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'a long answer'), { id: 'r1', direct: true }));
   await threads.idle();
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'all reasoning')));

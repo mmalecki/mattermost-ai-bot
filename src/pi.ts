@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { AssistantMessage } from '@earendil-works/pi-ai';
 import {
   type AgentSession,
   createAgentSession,
@@ -12,8 +13,9 @@ import {
   SessionManager,
   SettingsManager,
 } from '@earendil-works/pi-coding-agent';
-import type { Agent } from './agent.ts';
+import type { Agent, RunOutcome } from './agent.ts';
 import { type Config, type ModelChoice, parseModel } from './config.ts';
+import { textOf } from './content.ts';
 import { errorMessage } from './error.ts';
 import { toolGuard } from './guard.ts';
 import { imageGeneration, toolImages } from './image-tools.ts';
@@ -219,9 +221,11 @@ export async function createAgent(config: Config, botUsername: string): Promise<
         get messages() {
           return session.messages;
         },
-        prompt: (text, images = []) => {
+        async prompt(text, images = []) {
           sessions.add(rootId);
-          return session.prompt(text, { expandPromptTemplates: false, images });
+          const startedAt = Date.now();
+          await session.prompt(text, { expandPromptTemplates: false, images });
+          return runOutcome(session.messages, startedAt);
         },
         abort: () => session.abort(),
         entries: () => session.sessionManager.getEntries(),
@@ -230,4 +234,18 @@ export async function createAgent(config: Config, botUsername: string): Promise<
       };
     },
   };
+}
+
+/**
+ * How the run started at `startedAt` ended, from its final answer in `messages`. Messages are stamped
+ * with when their request started, so an earlier run's answer is never taken for this one's. pi drops
+ * an answer cut off at the output limit to compact and retry, and the retry may not happen, so a run
+ * can end with none.
+ */
+export function runOutcome(messages: readonly AgentSession['messages'][number][], startedAt: number): RunOutcome {
+  const message = messages.findLast((m) => m.role === 'assistant') as AssistantMessage | undefined;
+  if (!message || !(message.timestamp >= startedAt)) return { stop: 'no answer' };
+  if (message.stopReason === 'error' || message.stopReason === 'aborted') return { stop: 'failed', error: message.errorMessage ?? message.stopReason };
+  const text = textOf(message.content).trim();
+  return { stop: message.stopReason === 'length' ? 'cut off' : 'answered', text };
 }

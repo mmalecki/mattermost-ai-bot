@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { Agent } from '../src/agent.ts';
-import { createAgent } from '../src/pi.ts';
+import { createAgent, runOutcome } from '../src/pi.ts';
 import { loadConfig } from '../src/config.ts';
 import type { ScheduledJob } from '../src/scheduler.ts';
 
@@ -87,12 +87,10 @@ test('a session runs on the model it was created with, MODEL by default', async 
   assert.deepEqual([session.model, session.takesImages], [large, true]);
   // A thread has a session once it has been prompted, as pi writes its file then.
   assert.equal(agent.hasSession('r1'), false);
-  await session.prompt('hi');
+  assert.deepEqual(await session.prompt('hi'), { stop: 'answered', text: 'hello' });
   assert.equal(agent.hasSession('r1'), true);
   // In the thread's own directory.
   assert.ok(existsSync(join(dir, 'sessions', 'r1', 'session.jsonl')));
-  const answer = session.messages.at(-1) as AssistantMessage;
-  assert.deepEqual([answer.role, answer.content], ['assistant', [{ type: 'text', text: 'hello' }]]);
   await session.close();
 
   session = await open(agent, 'r1', options);
@@ -278,4 +276,22 @@ test("a reopened session's scheduled jobs come due again, and keep it open only 
   assert.deepEqual(due, [{ id: 'j1', prompt: 'Check the garage' }]);
   assert.equal(reopened.hasPendingJobs(), false);
   await reopened.close();
+});
+
+test('tells how a run ended from its final answer, and never takes an earlier run\'s for it', () => {
+  const startedAt = Date.UTC(2026, 9, 25, 16);
+  const answer = (stopReason: string, text = '', extra: object = {}) =>
+    ({ role: 'assistant', stopReason, timestamp: startedAt + 500, content: text ? [{ type: 'text', text }] : [], ...extra }) as unknown as AssistantMessage;
+  const user = { role: 'user', content: 'hi', timestamp: startedAt } as const;
+
+  assert.deepEqual(runOutcome([user, answer('stop', ' Done. ')], startedAt), { stop: 'answered', text: 'Done.' });
+  assert.deepEqual(runOutcome([user, answer('toolUse', 'Looking.'), answer('stop')], startedAt), { stop: 'answered', text: '' });
+  assert.deepEqual(runOutcome([user, answer('length', 'Part of it')], startedAt), { stop: 'cut off', text: 'Part of it' });
+  assert.deepEqual(runOutcome([user, answer('length')], startedAt), { stop: 'cut off', text: '' });
+  assert.deepEqual(runOutcome([user, answer('error', '', { errorMessage: 'rate limited' })], startedAt), { stop: 'failed', error: 'rate limited' });
+  assert.deepEqual(runOutcome([user, answer('aborted')], startedAt), { stop: 'failed', error: 'aborted' });
+  assert.deepEqual(runOutcome([user], startedAt), { stop: 'no answer' });
+  // The last answer is an earlier run's, as when pi dropped this one's to compact, and didn't retry.
+  const earlier = { ...answer('stop', 'Old answer'), timestamp: startedAt - 60_000 };
+  assert.deepEqual(runOutcome([earlier, user], startedAt), { stop: 'no answer' });
 });

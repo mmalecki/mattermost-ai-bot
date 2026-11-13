@@ -43,10 +43,10 @@ export interface ThreadSession {
   readonly keepsImages: boolean;
   /** Whether the thread has scheduled jobs still to come due, which keep the session open. */
   hasPendingJobs(): boolean;
-  /** The conversation so far. */
+  /** The conversation so far, as pi keeps it: the eval reads the tool calls from it. */
   readonly messages: readonly AgentMessage[];
-  /** Runs the agent on `text`, with `images`, until it is done answering. */
-  prompt(text: string, images?: ImageContent[]): Promise<void>;
+  /** Runs the agent on `text`, with `images`, until it is done answering, and says how the run ended. */
+  prompt(text: string, images?: ImageContent[]): Promise<RunOutcome>;
   /** Stops the run in progress. */
   abort(): Promise<void>;
   /** The session file's entries, oldest first. */
@@ -56,3 +56,14 @@ export interface ThreadSession {
   /** Shuts down the session's extensions, which closes their connections and timers, and disposes it. */
   close(): Promise<void>;
 }
+
+/** How a run ended, as far as the thread's reply goes. */
+export type RunOutcome =
+  /** With the answer's text, which may be empty, as when its images say it all. */
+  | { stop: 'answered'; text: string }
+  /** At the output limit, with what text there is. */
+  | { stop: 'cut off'; text: string }
+  /** With an error, or aborted. */
+  | { stop: 'failed'; error: string }
+  /** With no answer of its own. */
+  | { stop: 'no answer' };
