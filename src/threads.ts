@@ -1,63 +1,10 @@
-import type { AssistantMessage, ImageContent } from '@earendil-works/pi-ai';
-import type { Agent, ThreadSession } from './agent.ts';
+import type { ImageContent } from '@earendil-works/pi-ai';
+import type { Agent, RunOutcome, Seen, ThreadSession } from './agent.ts';
+import type { Chat, IncomingPost, ThreadPost } from './chat.ts';
 import type { AllowedUsers, ModelChoice } from './config.ts';
-import { textOf } from './content.ts';
 import { errorMessage } from './error.ts';
-import { download, imageSource, ThreadImages } from './images.ts';
-import { pendingJobs, type ScheduledJob } from './scheduler.ts';
-
-export interface ThreadPost {
-  id: string;
-  userId: string;
-  createAt: number;
-  message: string;
-  files: PostFile[];
-}
-
-/** A file attached to a post. */
-export interface PostFile {
-  id: string;
-  name: string;
-  mimeType: string;
-  /** In bytes. */
-  size: number;
-  /** Whether the server has a smaller JPEG of it, for images. */
-  hasPreview: boolean;
-}
-
-/** A file to attach to a reply. */
-export interface OutgoingFile {
-  name: string;
-  mimeType: string;
-  /** Not a SharedArrayBuffer view, which Blob won't take. */
-  data: Uint8Array<ArrayBuffer>;
-}
-
-/** What threads need of the chat server. */
-export interface Chat {
-  /** The thread's posts, oldest first, without the bot's own and system posts. */
-  threadPosts(rootId: string): Promise<ThreadPost[]>;
-  /** A file's contents, or with `preview`, the server's smaller JPEG of an image. */
-  file(fileId: string, preview: boolean): Promise<Uint8Array>;
-  username(userId: string): Promise<string>;
-  /**
-   * Posts `message`, which may be empty when there are files, with `files` attached. Returns their ids, in
-   * order, with undefined for one that couldn't be attached.
-   */
-  reply(channelId: string, rootId: string, message: string, files?: OutgoingFile[]): Promise<(string | undefined)[]>;
-  typing(channelId: string, rootId: string): void;
-}
-
-export interface IncomingPost {
-  id: string;
-  rootId: string;
-  channelId: string;
-  userId: string;
-  /** System posts have a type; user posts don't. */
-  type: string;
-  direct: boolean;
-  mentioned: boolean;
-}
+import { attachments, formatJob, formatPosts, trailingModel } from './input.ts';
+import type { ScheduledJob } from './scheduler.ts';
 
 export interface ThreadsOptions {
   botUserId: string;
@@ -76,19 +23,7 @@ interface ThreadContext {
   options: ThreadsOptions;
 }
 
-/** Session entry recording the posts handed to the agent. Not part of the model's context. */
-const SEEN_ENTRY = 'mattermost';
-
-interface SeenEntry {
-  /** The newest post's. */
-  createAt: number;
-  /** The posts' authors. */
-  userIds: string[];
-}
-
 const TYPING_INTERVAL_MS = 3_000;
-/** Images handed to the agent with one batch of posts; any more are only named. */
-const MAX_IMAGES = 8;
 
 /**
  * One agent session per thread. Threads start with a DM or a mention of the bot, and from then on
@@ -161,9 +96,11 @@ class Thread {
   #pending = false;
   /** Scheduled jobs that came due, run after any new posts. */
   readonly #jobs: ScheduledJob[] = [];
-  /** The thread's images: posted ones, and those tools made and returned. */
-  readonly #images: ThreadImages;
-  /** Whether the current run may call a tool, by its name. */
+  /**
+   * Whether the current run may call a tool, by its name. The session's tool guard asks it through
+   * #open's allowTools, and it is set anew before each run. That's safe only because a thread's runs
+   * never overlap: were a scheduled job to run during a post's run, each would get the other's tools.
+   */
   #allowed: (toolName: string) => boolean = () => false;
   #idleTimer: NodeJS.Timeout | undefined;
   #closed = false;
@@ -175,7 +112,6 @@ class Thread {
     this.#firstPostId = firstPostId;
     this.#previous = previous;
     this.#retire = retire;
-    this.#images = new ThreadImages(context.agent.images(rootId));
   }
 
   wake(): void {
@@ -186,7 +122,7 @@ class Thread {
 
   due(job: ScheduledJob): void {
     if (this.#closed) {
-      // The extension has already counted it as run, so it won't come due again.
+      // The scheduler has already taken it off, or moved it on to its next time, so this run of it is lost.
       console.warn(`Thread ${this.#rootId}: closing, so scheduled job ${job.id} is dropped`);
       return;
     }
@@ -242,7 +178,6 @@ class Thread {
       model,
       allowTools: (toolName) => this.#allowed(toolName),
       onScheduled: (due) => this.due(due),
-      imageStore: this.#images,
     }));
   }
 
@@ -250,7 +185,7 @@ class Thread {
     const { agent, chat } = this.#context;
     // A new thread's posts may pick its model, so its session waits for them.
     const isNew = !this.#session && !agent.hasSession(this.#rootId);
-    const seen = isNew ? { createAt: 0, userIds: new Set<string>() } : seenPosts(await this.#open());
+    const seen: Seen = isNew ? { createAt: 0, userIds: new Set() } : (await this.#open()).seen();
     const unseen = (await chat.threadPosts(this.#rootId)).filter((p) => p.createAt > seen.createAt);
     if (!unseen.length) return;
     let picked: { model?: ModelChoice; posts: ThreadPost[] };
@@ -272,11 +207,10 @@ class Thread {
     const names = await Promise.all(posts.map((p) => chat.username(p.userId).catch(() => p.userId)));
     await this.#allowTools(seen, posts.map((p) => p.userId));
     // Recorded first, so a failing run doesn't send the same posts again.
-    const entry: SeenEntry = { createAt: posts.at(-1)!.createAt, userIds: [...new Set(posts.map((p) => p.userId))] };
-    session.appendEntry(SEEN_ENTRY, entry);
+    session.markSeen(posts.at(-1)!.createAt, posts.map((p) => p.userId));
 
     console.log(`Thread ${this.#rootId}: ${posts.length} new post(s) from ${[...new Set(names)].join(', ')}`);
-    const { lines, images } = await this.#attachments(posts, session.takesImages);
+    const { lines, images } = await attachments(chat, session, posts, this.#rootId);
     await this.#answer(session, formatPosts(posts, names, lines), images);
   }
 
@@ -296,54 +230,9 @@ class Thread {
     return { model, posts: posts.with(i, { ...posts[i]!, message: picked.message }) };
   }
 
-  /**
-   * The posts' files: lines naming each, and the images the model can see, in the order of their
-   * lines, if it takes `images`. Images are kept in the thread when the model or some tool takes them,
-   * and named as they're kept. A file that can't be handed over is only named, so answering doesn't
-   * fail on it.
-   */
-  async #attachments(posts: ThreadPost[], takesImages: boolean): Promise<{ lines: string[][]; images: ImageContent[] }> {
-    const { agent } = this.#context;
-    const images: ImageContent[] = [];
-    const lines: string[][] = [];
-    for (const post of posts) {
-      const postLines: string[] = [];
-      for (const file of post.files) {
-        const image = file.mimeType.startsWith('image/');
-        if (image && (takesImages || agent.imageTools)) postLines.push(await this.#image(file, images, takesImages));
-        else postLines.push(fileLine(file));
-      }
-      lines.push(postLines);
-    }
-    return { lines, images };
-  }
-
-  /**
-   * Keeps the image in the thread, and returns its line, with the name it's kept under. When the model
-   * `takesImages`, adds it to `images` too.
-   */
-  async #image(file: PostFile, images: ImageContent[], takesImages: boolean): Promise<string> {
-    const source = imageSource(file);
-    if (!source) return `[image: ${file.name}, not shown: too large, or in a format you can't see]`;
-    let image: ImageContent;
-    let name: string;
-    try {
-      image = await download(this.#context.chat, file.id, source);
-      name = await this.#images.save(file.name, image);
-    } catch (error) {
-      console.warn(`Thread ${this.#rootId}: image ${file.id} couldn't be downloaded:`, errorMessage(error));
-      return `[image: ${file.name}, not shown: it couldn't be downloaded]`;
-    }
-    // The model can't see it, but tools can still take it.
-    if (!takesImages) return `[image: ${name}, which you can't see]`;
-    if (images.length >= MAX_IMAGES) return `[image: ${name}, not shown: too many images at once]`;
-    images.push(image);
-    return `[image ${images.length}: ${name}]`;
-  }
-
   async #runJob(session: ThreadSession, job: ScheduledJob): Promise<void> {
     // No thread fetch: posts are answered before jobs in a run, so their authors are in the session.
-    await this.#allowTools(seenPosts(session), []);
+    await this.#allowTools(session.seen(), []);
     console.log(`Thread ${this.#rootId}: scheduled job ${job.id} is due`);
     await this.#answer(session, formatJob(job, Date.now()));
   }
@@ -368,13 +257,11 @@ class Thread {
   }
 
   async #answer(session: ThreadSession, prompt: string, images: ImageContent[] = []): Promise<void> {
-    const startedAt = Date.now();
-    this.#images.startRun();
-    await session.prompt(prompt, images);
-    const reply = replyText(session, startedAt);
-    const files = await this.#images.takeAttached();
-    // pi drops an answer cut off at the output limit to compact and retry, and the retry may not happen.
-    if (reply === NO_ANSWER) console.warn(`Thread ${this.#rootId}: the run added no answer`);
+    session.images.startRun();
+    const outcome = await session.prompt(prompt, images);
+    const reply = replyText(outcome);
+    const files = await session.images.takeAttached();
+    if (outcome.stop === 'no answer') console.warn(`Thread ${this.#rootId}: the run added no answer`);
     if (reply || files.length) {
       await this.#context.chat.reply(this.#channelId, this.#rootId, reply ?? '', files);
     }
@@ -385,86 +272,23 @@ class Thread {
     clearTimeout(this.#idleTimer);
     this.#idleTimer = setTimeout(() => {
       // Scheduled jobs live in the session, so it stays open while it has some.
-      if (this.#session && pendingJobs(this.#session.entries()).length) return this.#scheduleIdle();
+      if (this.#session?.hasPendingJobs()) return this.#scheduleIdle();
       this.#retire();
     }, this.#context.options.idleMs);
     this.#idleTimer.unref();
   }
 }
 
-/** The posts handed to the agent so far, as seenPosts() reads them back. */
-interface Seen {
-  createAt: number;
-  userIds: Set<string>;
-}
-
-function seenPosts(session: ThreadSession): Seen {
-  let createAt = 0;
-  const userIds = new Set<string>();
-  for (const entry of session.entries()) {
-    if (entry.type !== 'custom' || entry.customType !== SEEN_ENTRY) continue;
-    const seen = entry.data as SeenEntry;
-    createAt = Math.max(createAt, seen.createAt);
-    for (const id of seen.userIds) userIds.add(id);
+/** What's posted for how a run ended: its answer, or what went wrong. Nothing, for an empty answer. */
+function replyText(outcome: RunOutcome): string | undefined {
+  switch (outcome.stop) {
+    case 'answered':
+      return outcome.text || undefined;
+    case 'cut off':
+      return outcome.text ? `${outcome.text}\n\n_(Cut off at the output limit.)_` : "Sorry, I couldn't finish: I reached the output limit.";
+    case 'failed':
+      return `Sorry, I couldn't finish: ${outcome.error}`;
+    case 'no answer':
+      return "Sorry, I couldn't come up with an answer.";
   }
-  return { createAt, userIds };
-}
-
-// With its UTC offset, so the model can compare post times with tool results in other zones.
-// Follows TZ.
-const timeFormat = new Intl.DateTimeFormat('sv-SE', {
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-  timeZoneName: 'shortOffset',
-});
-
-/**
- * `message` without its last word, when that is `/provider/model[:thinking]`, and the word without
- * its slash. Whether it names a model is the agent's to say.
- */
-export function trailingModel(message: string): { message: string; ref: string } | undefined {
-  const match = /(?:^|\s)\/(\S+\/\S+)\s*$/.exec(message);
-  if (!match) return undefined;
-  return { message: message.slice(0, match.index).trimEnd(), ref: match[1]! };
-}
-
-/** A file the model only learns the name of. */
-function fileLine(file: PostFile): string {
-  return `[file: ${file.name} (${file.mimeType || 'unknown type'}), which you can't open]`;
-}
-
-/** `attachments` are each post's lines for its files, so a post with only a file isn't empty. */
-export function formatPosts(posts: ThreadPost[], names: string[], attachments: string[][] = []): string {
-  return posts
-    .map((p, i) => {
-      const text = [p.message, ...(attachments[i] ?? [])].filter(Boolean).join('\n');
-      return `@${names[i]} (${timeFormat.format(p.createAt)}, post ${p.id}): ${text}`;
-    })
-    .join('\n\n');
-}
-
-export function formatJob(job: ScheduledJob, now: number): string {
-  return `Scheduled job ${job.id} is due (${timeFormat.format(now)}): ${job.prompt}`;
-}
-
-const NO_ANSWER = "Sorry, I couldn't come up with an answer.";
-
-/**
- * The text of the final answer of the run started at `startedAt`, or what went wrong. Messages are
- * stamped with when their request started, so an earlier run's answer is never taken for this one's.
- */
-function replyText(session: ThreadSession, startedAt: number): string | undefined {
-  const message = session.messages.findLast((m) => m.role === 'assistant') as AssistantMessage | undefined;
-  if (!message || !(message.timestamp >= startedAt)) return NO_ANSWER;
-  if (message.stopReason === 'error' || message.stopReason === 'aborted') {
-    return `Sorry, I couldn't finish: ${message.errorMessage ?? message.stopReason}`;
-  }
-  const text = textOf(message.content).trim();
-  if (message.stopReason === 'length') {
-    return text ? `${text}\n\n_(Cut off at the output limit.)_` : "Sorry, I couldn't finish: I reached the output limit.";
-  }
-  return text || undefined;
 }

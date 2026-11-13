@@ -1,37 +1,15 @@
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import type { ImageContent } from '@earendil-works/pi-ai';
-import type { Chat, OutgoingFile, PostFile } from './threads.ts';
-import type { ImageStore } from './tools.ts';
+import type { OutgoingFile } from './chat.ts';
 
 /** The image formats models take, with the file extension each is kept under. */
 const IMAGE_EXTENSIONS: Record<string, string> = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };
 /** The formats, by file extension, of the images kept. */
 const IMAGE_TYPES: Record<string, string> = { ...Object.fromEntries(Object.entries(IMAGE_EXTENSIONS).map(([type, extension]) => [extension, type])), '.jpeg': 'image/jpeg' };
-/**
- * Larger images, and those in other formats, are handed over as the server's preview, or not at all
- * without one. pi scales them all down to the model's limits.
- */
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
-
-/** How a posted image is downloaded: as it is, or as the server's preview of it. */
-export interface ImageSource {
-  preview: boolean;
-  mimeType: string;
-}
-
-/**
- * How an image is handed over: as it is, or as the server's preview when it's too large or in a format
- * models don't take. Undefined when neither works.
- */
-export function imageSource(file: PostFile): ImageSource | undefined {
-  if (IMAGE_EXTENSIONS[file.mimeType] && file.size <= MAX_IMAGE_BYTES) return { preview: false, mimeType: file.mimeType };
-  return file.hasPreview ? { preview: true, mimeType: 'image/jpeg' } : undefined;
-}
-
-/** A posted image, downloaded as `source` says, for a model. */
-export async function download(chat: Pick<Chat, 'file'>, fileId: string, { preview, mimeType }: ImageSource): Promise<ImageContent> {
-  return { type: 'image', data: Buffer.from(await chat.file(fileId, preview)).toString('base64'), mimeType };
+/** Whether models take images of `mimeType`, which are kept with its extension. */
+export function isImageType(mimeType: string): boolean {
+  return Object.hasOwn(IMAGE_EXTENSIONS, mimeType);
 }
 
 /** A thread's images, as files in its directory, by name: the names the agent sees and passes to tools. */
@@ -47,13 +25,18 @@ export interface ImageFiles {
   path(name: string): Promise<string>;
 }
 
+/** The thread's images, for the tools that make and take them. */
+export interface ImageStore extends ImageFiles {
+  /** Attaches the image `name` names, one kept in the thread, to the reply. */
+  attach(name: string): void;
+}
+
 /** The images kept in `dir`, which is created once one is. */
 export function imageFiles(dir: string): ImageFiles {
   const path = async (name: string) => {
-    const file = join(dir, name);
     // Only names save() could have given, so a name can't reach outside the directory.
-    const ok = name === safeName(name) && IMAGE_TYPES[extname(name).toLowerCase()];
-    if (!ok || !(await isFile(file))) {
+    const file = isImageName(name) ? join(dir, name) : undefined;
+    if (!file || !(await isFile(file))) {
       throw new Error(`${name} is not an image in this thread: give the name on an [image] line, or of an image you generated or a tool returned`);
     }
     return file;
@@ -83,6 +66,14 @@ export function imageFiles(dir: string): ImageFiles {
       ),
     path,
   };
+}
+
+/**
+ * Whether `name` could name one of a thread's images: it's a name save() could have given. Quick to
+ * say no to anything else, such as image data given in its place, which may be large.
+ */
+export function isImageName(name: string): boolean {
+  return !!IMAGE_TYPES[extname(name).toLowerCase()] && name === safeName(name);
 }
 
 /**

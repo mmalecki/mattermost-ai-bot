@@ -22,7 +22,7 @@ export interface Config {
   /** The chat model the agent's vision tools look at images with, which must take them. Unset: no vision tools. */
   visionModel: ModelChoice | undefined;
   tools: ToolsConfig;
-  /** Whether the agent can schedule jobs in its threads, with pi-ate-scheduler. */
+  /** Whether the agent can schedule jobs in its threads. */
   scheduler: boolean;
   /** Whether the agent always has `codemode`, not only with servers of `codemode` exposure. */
   codemode: boolean;
@@ -32,6 +32,8 @@ export interface Config {
   appendSystemPromptPath: string;
   /** Thread sessions and pi's own state live here. */
   dataDir: string;
+  /** Idle thread sessions are closed after this long, unless they have scheduled jobs pending. */
+  idleMs: number;
 }
 
 export interface ToolsConfig {
@@ -72,6 +74,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
     return value;
   };
+  const optional = (name: string) => env[name]?.trim() || undefined;
   const flag = (name: string) => {
     const value = env[name]?.trim().toLowerCase() || 'false';
     if (!['1', 'true', '0', 'false'].includes(value)) throw new Error(`${name} must be true or false`);
@@ -80,8 +83,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   const mcpConfig = resolve(env.MCP_CONFIG || 'mcp.json');
   const url = trimSlash(required('MATTERMOST_URL'));
+  const publicUrl = optional('MATTERMOST_PUBLIC_URL');
+  const imageModel = optional('IMAGE_MODEL');
+  const visionModel = optional('VISION_MODEL');
   return {
-    mattermost: { url, publicUrl: env.MATTERMOST_PUBLIC_URL?.trim() ? trimSlash(env.MATTERMOST_PUBLIC_URL.trim()) : url, token: required('MATTERMOST_TOKEN') },
+    mattermost: { url, publicUrl: publicUrl ? trimSlash(publicUrl) : url, token: required('MATTERMOST_TOKEN') },
     llm: {
       ...parseModel(required('MODEL')),
       // Low enough that a model stuck repeating itself stops soon; reasoning counts towards it.
@@ -89,8 +95,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       // pi's own file for custom providers, kept next to the tools like APPEND_SYSTEM.md.
       modelsPath: join(dirname(mcpConfig), 'models.json'),
     },
-    imageModel: env.IMAGE_MODEL?.trim() ? parseImageModel(env.IMAGE_MODEL.trim()) : undefined,
-    visionModel: env.VISION_MODEL?.trim() ? parseVisionModel(env.VISION_MODEL.trim()) : undefined,
+    imageModel: imageModel ? parseImageModel(imageModel) : undefined,
+    visionModel: visionModel ? parseModel(visionModel, { name: 'VISION_MODEL', example: 'openrouter/qwen/qwen3-vl-235b-a22b-instruct' }) : undefined,
     // A missing default file means no MCP servers; a missing file that was asked for is an error.
     tools: loadTools(mcpConfig, !!env.MCP_CONFIG),
     scheduler: flag('SCHEDULER'),
@@ -99,16 +105,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // pi's name for instructions added to its system prompt, kept next to the tools they're about.
     appendSystemPromptPath: join(dirname(mcpConfig), 'APPEND_SYSTEM.md'),
     dataDir: resolve(env.DATA_DIR || 'data'),
+    idleMs: 15 * 60_000,
   };
 }
 
 /**
  * `provider/model[:thinking]`, as pi's `--model` takes it. The model may contain `/` itself, as
- * OpenRouter's do, and `:` too, so only a known thinking level after the last `:` counts as one.
+ * OpenRouter's do, and `:` too, so only a known thinking level after the last `:` counts as one. An
+ * error names the variable `name`, and gives `example`, and the thinking level only if it takes one.
  */
-export function parseModel(ref: string): ModelChoice {
+export function parseModel(ref: string, { name = 'MODEL', example = 'mistral/mistral-small-2603', thinking = true } = {}): ModelChoice {
   const slash = ref.indexOf('/');
-  if (slash <= 0 || slash === ref.length - 1) throw new Error(`MODEL must be provider/model, such as mistral/mistral-small-2603, not "${ref}"`);
+  if (slash <= 0 || slash === ref.length - 1) {
+    throw new Error(`${name} must be provider/model${thinking ? '[:thinking]' : ''}, such as ${example}, not "${ref}"`);
+  }
   const provider = ref.slice(0, slash);
   let model = ref.slice(slash + 1);
   let thinkingLevel: ThinkingLevel = 'off';
@@ -123,23 +133,9 @@ export function parseModel(ref: string): ModelChoice {
 
 /** `provider/model`, as MODEL takes it, without a thinking level: image models don't think. */
 export function parseImageModel(ref: string): NonNullable<Config['imageModel']> {
-  let parsed;
-  try {
-    parsed = parseModel(ref);
-  } catch {
-    throw new Error(`IMAGE_MODEL must be provider/model, such as openrouter/google/gemini-2.5-flash-image, not "${ref}"`);
-  }
-  if (parsed.thinkingLevel !== 'off') throw new Error(`IMAGE_MODEL takes no thinking level, as in "${ref}"`);
-  return { provider: parsed.provider, model: parsed.model };
-}
-
-/** `provider/model[:thinking]`, as MODEL takes it. */
-export function parseVisionModel(ref: string): ModelChoice {
-  try {
-    return parseModel(ref);
-  } catch {
-    throw new Error(`VISION_MODEL must be provider/model[:thinking], such as openrouter/qwen/qwen3-vl-235b-a22b-instruct, not "${ref}"`);
-  }
+  const { provider, model, thinkingLevel } = parseModel(ref, { name: 'IMAGE_MODEL', example: 'openrouter/bytedance-seed/seedream-5-0-pro', thinking: false });
+  if (thinkingLevel !== 'off') throw new Error(`IMAGE_MODEL takes no thinking level, as in "${ref}"`);
+  return { provider, model };
 }
 
 /**

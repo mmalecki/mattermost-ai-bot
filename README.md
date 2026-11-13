@@ -28,8 +28,7 @@ Set in `.env`:
 * `MCP_CONFIG` - path to the tools configuration, below. Default `./mcp.json`, which may be missing
 * `DATA_DIR` - default `./data`. Each thread has a directory in `sessions/`, named after its root post, with its
   session in `session.jsonl` and its images in `images/`
-* `SCHEDULER` - `true` lets the agent schedule jobs in a thread, once or repeatedly, with
-  [pi-ate-scheduler](https://github.com/catlain/pi-scheduler). Default `false`. See below
+* `SCHEDULER` - `true` lets the agent schedule jobs in a thread, once or repeatedly. Default `false`. See below
 * `CODEMODE` - `true` gives the agent [Pi's `codemode`](https://pi.dev/docs/latest/codemode) tool even when every MCP
   server has `direct` exposure. Default `false`. See below
 * `ALLOW_PICKING_MODEL` - `true` lets the post that starts a thread pick its model. Default `false`. See below
@@ -219,8 +218,8 @@ posted to the thread. Scheduling is a tool call, so only `allowedUsers` can set 
 its thread still has them.
 
 Jobs are kept in the thread's session file, and a thread with jobs pending stays open past 15 idle minutes. They
-don't survive a restart well: a thread's jobs resume only once it gets a new post, and any that came due in the
-meantime, recurring ones included, are dropped. Intervals run up to 24 days, from 5 seconds for a one-off job and a
+don't survive a restart well: a thread's jobs resume only once it gets a new post. A one-off job that came due in the
+meantime is dropped, and a recurring one skips the times it missed, keeping to its times after. Intervals run up to 24 days, from 5 seconds for a one-off job and a
 minute for a recurring one, and a thread can have 10 jobs.
 
 ## Running
@@ -236,7 +235,7 @@ npx @mmalecki/mattermost-ai-bot
 ```
 
 Run it in the directory with `.env`, `mcp.json`, `models.json` and `APPEND_SYSTEM.md`. Variables already set in the
-environment win over `.env`. It needs `git` to install, for pi-ate-scheduler.
+environment win over `.env`.
 
 ### Docker
 ```sh
@@ -268,7 +267,7 @@ npm start
 ```
 
 `npm test` runs the tests, `npm run typecheck` checks types. Both, and `npm start`, run the TypeScript sources
-directly; `npm run build` compiles them to `dist/`, which the npm package runs, and `npm pack` builds first.
+directly; `npm run build` compiles them to `dist/`, which the npm package and the Docker image run, and `npm pack` builds first.
 
 On first `SIGINT` or `SIGTERM`, the bot stops handling new posts and exits once running threads finish their current run.
 Second signal exits at once.

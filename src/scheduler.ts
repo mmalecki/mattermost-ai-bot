@@ -1,146 +1,215 @@
-import { fileURLToPath } from 'node:url';
-import type { CustomEntry, ExtensionAPI, ExtensionFactory, SessionEntry } from '@earendil-works/pi-coding-agent';
-import { createJiti } from 'jiti';
+import { randomBytes } from 'node:crypto';
+import { Type } from '@earendil-works/pi-ai';
+import { type CustomEntry, defineTool, type ExtensionAPI, type ExtensionFactory, type SessionEntry } from '@earendil-works/pi-coding-agent';
+import { formatTime } from './time.ts';
 
-/** A scheduled job that is due: the extension's id for it, and the prompt it was set up with. */
+/** A scheduled job that is due: its id, and the prompt it was set up with. */
 export interface ScheduledJob {
   id: string;
   prompt: string;
 }
 
-/** What the bot reads of the extension's timers. */
-interface Timer {
-  id: string;
-  status: 'active' | 'completed' | 'cancelled' | 'error';
+/** A job the thread has pending, as its session file keeps it. */
+export interface Job extends ScheduledJob {
+  intervalMs: number;
+  recurring: boolean;
+  /** When it is next due. */
   expiresAt: number;
 }
 
-/** The extension's session entry, a snapshot of all its timers appended on every change. */
+/**
+ * The session entry with a snapshot of the thread's pending jobs, appended whenever one is made, runs
+ * out or is cancelled, though not when a recurring one moves on to its next time. The bot
+ * used pi-ate-scheduler before, whose snapshots look the same, but also list the jobs that are done,
+ * by their `status`, so threads that have them keep their jobs.
+ */
 const SNAPSHOT_ENTRY = 'scheduler';
+type Snapshot = CustomEntry<{ timers?: (Job & { status?: string })[] }>;
+
 const MIN_INTERVAL_MS = 5_000;
 // Each run of a recurring job is a model run and a post, so it may not repeat faster than this.
 const MIN_RECURRING_MS = 60_000;
 // Node fires longer timeouts at once, which would loop a recurring job.
 const MAX_INTERVAL_MS = 2 ** 31 - 1;
 const MAX_JOBS = 10;
-// A job still counts as pending this long after its time, while the extension gets to it.
-const DUE_GRACE_MS = 60_000;
 
-/**
- * Loads pi-ate-scheduler. Published as TypeScript, which Node won't strip under node_modules, so it
- * goes through jiti as pi does with installed packages. Its pi imports resolve to the bot's own copy.
- */
-export async function loadScheduler(): Promise<ExtensionFactory> {
-  const jiti = createJiti(import.meta.url);
-  return jiti.import<ExtensionFactory>(fileURLToPath(import.meta.resolve('pi-ate-scheduler')), { default: true });
+/** A thread's scheduled jobs: the extension with the `schedule` tool, and whether any are pending. */
+export interface ThreadScheduler {
+  extension: ExtensionFactory;
+  /** Whether the thread has jobs still to come due. */
+  hasPendingJobs(): boolean;
 }
 
 /**
- * pi-ate-scheduler for one thread, adapted to the bot:
- * - A due job goes to `onDue`, which runs it like posts are run, instead of starting a run in the session.
- * - Timers are restored from the latest snapshot only. The extension replays every snapshot, which
- *   brings back cancelled jobs, and also reads a state file from the home directory, which this skips.
- * - `schedule` is described in English, and calls with an interval Node can't keep, or past
- *   MAX_JOBS pending jobs, are blocked.
- * Its commands (/loop, /remind, /tasks) are never run: the bot doesn't dispatch commands.
+ * The `schedule` tool, for the thread `rootId`: jobs that give the agent a prompt later, once or every
+ * so often. A due job goes to `onDue`, which runs it like posts are run. Jobs are kept in the session
+ * file, and taken up again when the session is reopened: a recurring one that came due meanwhile at
+ * its next time, a one-off one not at all, as it's late for whatever it was meant to do.
  */
-export function scheduler(extension: ExtensionFactory, onDue: (job: ScheduledJob) => void): ExtensionFactory {
-  return (pi) => {
-    pi.on('tool_call', (event, ctx) => {
-      if (event.toolName !== 'schedule') return undefined;
-      const input = event.input as Record<string, unknown>;
-      if (input.action !== 'create') return undefined;
-      const ms = input.interval_ms;
-      const [min, label] = input.recurring === true ? [MIN_RECURRING_MS, 'a minute, for a recurring job'] : [MIN_INTERVAL_MS, '5 seconds'];
-      if (typeof ms !== 'number' || !(ms >= min && ms <= MAX_INTERVAL_MS)) {
-        return { block: true, reason: `interval_ms must be from ${min} (${label}) to ${MAX_INTERVAL_MS} (24 days).` };
+export function scheduler(rootId: string, onDue: (job: ScheduledJob) => void): ThreadScheduler {
+  const jobs = new Map<string, Job>();
+  const timers = new Map<string, NodeJS.Timeout>();
+  return { extension, hasPendingJobs: () => jobs.size > 0 };
+
+  function extension(pi: ExtensionAPI): void {
+    // Copies, as pi keeps the entry, and the jobs change.
+    const persist = () => pi.appendEntry(SNAPSHOT_ENTRY, { timers: [...jobs.values()].map((job) => ({ ...job })) });
+    /** Makes `change` to the jobs and saves them, or undoes it if saving fails. */
+    const save = (change: () => void, undo: () => void) => {
+      change();
+      try {
+        persist();
+      } catch (error) {
+        undo();
+        throw error;
       }
-      if (pendingJobs(ctx.sessionManager.getEntries()).length >= MAX_JOBS) {
-        return { block: true, reason: `This thread already has ${MAX_JOBS} scheduled jobs. Cancel one first.` };
+    };
+    // No longer than Node's timers can wait, so a job further off, such as one the clock was set back
+    // for, is armed again until it's due.
+    const arm = (job: Job) => timers.set(job.id, setTimeout(() => fire(job), Math.min(MAX_INTERVAL_MS, Math.max(0, job.expiresAt - Date.now()))));
+    // Off the schedule, or on to its next time, before it's run, so a run that fails doesn't repeat it.
+    const fire = (job: Job) => {
+      if (job.expiresAt > Date.now()) return void arm(job);
+      timers.delete(job.id);
+      if (job.recurring) {
+        // Not saved: a reopened session works out its next time from any earlier one.
+        advance(job, Date.now());
+        arm(job);
+      } else {
+        jobs.delete(job.id);
+        // In a timer, where an error would end the bot. The job runs all the same.
+        try {
+          persist();
+        } catch (error) {
+          console.error(`Thread ${rootId}: saving its scheduled jobs failed:`, error);
+        }
       }
-      return undefined;
+      onDue({ id: job.id, prompt: job.prompt });
+    };
+
+    const disarm = () => {
+      timers.forEach(clearTimeout);
+      timers.clear();
+    };
+
+    pi.on('session_start', (_event, ctx) => {
+      // From scratch, should it start again, so no job is armed twice.
+      disarm();
+      jobs.clear();
+      const now = Date.now();
+      let changed = false;
+      for (const job of savedJobs(ctx.sessionManager.getEntries())) {
+        if (job.expiresAt <= now) {
+          changed = true;
+          if (!job.recurring) {
+            console.warn(`Thread ${rootId}: scheduled job ${job.id} came due while the bot was down, so it's dropped`);
+            continue;
+          }
+          advance(job, now);
+        }
+        jobs.set(job.id, job);
+        arm(job);
+      }
+      if (changed) persist();
     });
+    pi.on('session_shutdown', disarm);
 
-    const on = pi.on.bind(pi) as unknown as On;
-    const adapted = override(pi, {
-      sendMessage: ((message, options) => {
-        if (message.customType === SNAPSHOT_ENTRY) onDue(parseJob(message.content));
-        else pi.sendMessage(message, options);
-      }) satisfies ExtensionAPI['sendMessage'],
-      registerTool: (tool: ToolDefinition) => pi.registerTool({ ...tool, ...SCHEDULE_TOOL } as ToolDefinition),
-      on: ((event, handler) =>
-        on(event, (e, ctx) => handler(e, override(ctx, { sessionManager: latestSnapshotOnly(ctx.sessionManager) })))) satisfies On,
-    });
-    return extension(adapted);
-  };
+    pi.registerTool(
+      defineTool({
+        name: 'schedule',
+        label: 'Schedule',
+        description:
+          'The only way to do something later: schedules a job in this thread, a prompt you get again after interval_ms, once or every interval_ms. ' +
+          'When it is due, you do what the prompt says, and your reply is posted to the thread. Also lists and cancels jobs.',
+        promptSnippet: 'Schedule, list and cancel jobs that run later in this thread',
+        parameters: Type.Object({
+          action: Type.Unsafe<'create' | 'list' | 'cancel'>({ type: 'string', enum: ['create', 'list', 'cancel'] }),
+          interval_ms: Type.Optional(
+            Type.Number({ description: 'For create: milliseconds until the job is due: at least 5000, or 60000 for a recurring job' }),
+          ),
+          prompt: Type.Optional(Type.String({ description: 'For create: what to do when the job is due, written as an instruction to yourself' })),
+          recurring: Type.Optional(Type.Boolean({ description: 'For create: repeat every interval_ms. Default false' })),
+          id: Type.Optional(Type.String({ description: 'For cancel: the job id' })),
+        }),
+
+        async execute(_toolCallId, { action, interval_ms: ms, prompt, recurring = false, id }) {
+          const result = (text: string) => ({ content: [{ type: 'text' as const, text }], details: { jobs: [...jobs.values()].map((job) => ({ ...job })) } });
+          if (action === 'list') {
+            if (!jobs.size) return result('No jobs are scheduled in this thread.');
+            return result([...jobs.values()].sort((a, b) => a.expiresAt - b.expiresAt).map(describe).join('\n'));
+          }
+          if (action === 'cancel') {
+            if (!id) throw new Error('id must name the job to cancel.');
+            const job = jobs.get(id);
+            if (!job) throw new Error(`There is no job ${id} in this thread. List them for their ids.`);
+            save(
+              () => jobs.delete(id),
+              () => jobs.set(id, job),
+            );
+            clearTimeout(timers.get(id));
+            timers.delete(id);
+            return result(`Cancelled job ${id}.`);
+          }
+          const [min, label] = recurring ? [MIN_RECURRING_MS, 'a minute, for a recurring job'] : [MIN_INTERVAL_MS, '5 seconds'];
+          if (typeof ms !== 'number' || !(ms >= min && ms <= MAX_INTERVAL_MS)) {
+            throw new Error(`interval_ms must be from ${min} (${label}) to ${MAX_INTERVAL_MS} (24 days).`);
+          }
+          if (!prompt?.trim()) throw new Error('prompt must say what to do when the job is due.');
+          if (jobs.size >= MAX_JOBS) throw new Error(`This thread already has ${MAX_JOBS} scheduled jobs. Cancel one first.`);
+          let jobId: string;
+          do jobId = randomBytes(4).toString('hex');
+          while (jobs.has(jobId));
+          const job: Job = { id: jobId, prompt, intervalMs: ms, recurring, expiresAt: Date.now() + ms };
+          // Armed once it's saved, so a job the agent is told failed never runs.
+          save(
+            () => jobs.set(job.id, job),
+            () => jobs.delete(job.id),
+          );
+          arm(job);
+          return result(`Scheduled: ${describe(job)}`);
+        },
+      }),
+    );
+  }
 }
 
-/** Jobs the extension still has to run, from its latest snapshot. */
-export function pendingJobs(entries: SessionEntry[], now = Date.now()): Timer[] {
-  const timers = (latestSnapshot(entries) as CustomEntry<{ timers?: Timer[] }> | undefined)?.data?.timers ?? [];
-  return timers.filter((t) => t.status === 'active' && t.expiresAt > now - DUE_GRACE_MS);
+/**
+ * The jobs the thread had pending, as the session's latest snapshot of them saved them. Any that
+ * schedule couldn't have made, such as in a file edited by hand, are left out.
+ */
+export function savedJobs(entries: SessionEntry[]): Job[] {
+  const latest = entries.findLast((e) => e.type === 'custom' && e.customType === SNAPSHOT_ENTRY) as Snapshot | undefined;
+  return (latest?.data?.timers ?? [])
+    .filter((job) => (job.status ?? 'active') === 'active' && isJob(job))
+    .map(({ id, prompt, intervalMs, recurring, expiresAt }) => ({ id, prompt, intervalMs, recurring, expiresAt }));
 }
 
-const SCHEDULE_TOOL = {
-  description:
-    'The only way to do something later: schedules a job in this thread, a prompt you get again after interval_ms, once or every interval_ms. ' +
-    'When it is due, you do what the prompt says, and your reply is posted to the thread. Also lists and cancels jobs.',
-  promptSnippet: 'Schedule, list and cancel jobs that run later in this thread',
-  parameters: {
-    type: 'object',
-    properties: {
-      action: { type: 'string', enum: ['create', 'list', 'cancel'] },
-      interval_ms: { type: 'number', description: 'For create: milliseconds until the job is due: at least 5000, or 60000 for a recurring job' },
-      prompt: { type: 'string', description: 'For create: what to do when the job is due, written as an instruction to yourself' },
-      recurring: { type: 'boolean', description: 'For create: repeat every interval_ms. Default false' },
-      id: { type: 'string', description: 'For cancel: the job id' },
-    },
-    required: ['action'],
-  },
-};
-
-type ToolDefinition = Parameters<ExtensionAPI['registerTool']>[0];
-type On = (event: string, handler: (event: unknown, ctx: { sessionManager: SessionManagerView }) => unknown) => () => void;
-
-interface SessionManagerView {
-  getEntries(): SessionEntry[];
-  getSessionId(): string;
+function isJob(job: Partial<Record<keyof Job, unknown>>): boolean {
+  const { id, prompt, intervalMs, recurring, expiresAt } = job;
+  if (typeof id !== 'string' || typeof prompt !== 'string' || typeof recurring !== 'boolean' || !Number.isFinite(expiresAt)) return false;
+  return typeof intervalMs === 'number' && intervalMs >= (recurring ? MIN_RECURRING_MS : MIN_INTERVAL_MS) && intervalMs <= MAX_INTERVAL_MS;
 }
 
-function latestSnapshotOnly(sessionManager: SessionManagerView): SessionManagerView {
-  return override(sessionManager, {
-    getEntries: () => {
-      const entries = sessionManager.getEntries();
-      const latest = latestSnapshot(entries);
-      return entries.filter((e) => !isSnapshot(e) || e === latest);
-    },
-    // Only names the extension's state file in the home directory.
-    getSessionId: () => '',
-  });
+/** Moves a recurring `job` on to its first time after `now`, keeping to its times, such as 7:00 every day. */
+function advance(job: Job, now: number): void {
+  job.expiresAt += Math.max(1, Math.floor((now - job.expiresAt) / job.intervalMs) + 1) * job.intervalMs;
 }
 
-function latestSnapshot(entries: SessionEntry[]): CustomEntry | undefined {
-  return entries.findLast(isSnapshot);
+/** `job`, with when it's due to the second, as one-off jobs can be due in seconds. */
+function describe(job: Job): string {
+  return `job ${job.id}, due ${formatTime(job.expiresAt, { seconds: true })}${job.recurring ? `, then every ${duration(job.intervalMs)}` : ''}: ${job.prompt}`;
 }
 
-function isSnapshot(entry: SessionEntry): entry is CustomEntry {
-  return entry.type === 'custom' && entry.customType === SNAPSHOT_ENTRY;
-}
+const UNITS = [
+  ['day', 86_400_000],
+  ['hour', 3_600_000],
+  ['minute', 60_000],
+  ['second', 1_000],
+] as const;
 
-/** The extension's message for a due job is "[定时任务 <id>] <prompt>" ("scheduled task"). */
-function parseJob(content: unknown): ScheduledJob {
-  const text = typeof content === 'string' ? content : JSON.stringify(content);
-  const match = /^\[定时任务 (\w+)\] ([\s\S]*)$/.exec(text);
-  return match ? { id: match[1]!, prompt: match[2]! } : { id: '?', prompt: text };
-}
-
-/** `target` with some properties replaced. Its other methods stay bound to it. */
-function override<T extends object>(target: T, replaced: Record<string, unknown>): T {
-  return new Proxy(target, {
-    get(t, key) {
-      if (typeof key === 'string' && Object.hasOwn(replaced, key)) return replaced[key];
-      const value: unknown = Reflect.get(t, key);
-      return typeof value === 'function' ? value.bind(t) : value;
-    },
-  });
+/** `ms` in the largest unit that it's a whole number of, such as `90 minutes`. */
+function duration(ms: number): string {
+  const [unit, size] = UNITS.find(([, size]) => ms % size === 0) ?? ['millisecond', 1];
+  const n = ms / size;
+  return `${n} ${unit}${n === 1 ? '' : 's'}`;
 }

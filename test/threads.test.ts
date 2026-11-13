@@ -4,13 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import type { ImageContent } from '@earendil-works/pi-ai';
-import type { SessionEntry } from '@earendil-works/pi-coding-agent';
-import type { Agent, ThreadSession } from '../src/agent.ts';
+import type { Agent, RunOutcome, ThreadSession } from '../src/agent.ts';
 import { type ModelChoice, parseAllowedUsers, parseModel } from '../src/config.ts';
-import { imageFiles } from '../src/images.ts';
+import { type ImageStore, imageFiles, ThreadImages } from '../src/images.ts';
 import type { ScheduledJob } from '../src/scheduler.ts';
-import { type Chat, type IncomingPost, type OutgoingFile, type PostFile, type ThreadPost, Threads } from '../src/threads.ts';
-import type { ImageStore } from '../src/tools.ts';
+import type { Chat, IncomingPost, OutgoingFile, PostFile, ThreadPost } from '../src/chat.ts';
+import { Threads } from '../src/threads.ts';
 
 const BOT = 'bot';
 const USERS: Record<string, string> = { u1: 'maciej', u2: 'guest', u3: 'carol' };
@@ -52,24 +51,14 @@ class FakeChat implements Chat {
     if (this.gone.has(userId)) throw new Error(`no user ${userId}`);
     return USERS[userId] ?? userId;
   }
-  /** Whether attaching files fails. */
-  uploadFails = false;
-  #uploads = 0;
-
-  /** Attached files can be downloaded again, as `u<n>`. */
   async reply(channelId: string, rootId: string, message: string, files: OutgoingFile[] = []) {
     this.replies.push({ channelId, rootId, message, ...(files.length ? { files } : {}) });
-    return files.map((file) => {
-      if (this.uploadFails) return undefined;
-      const id = `u${++this.#uploads}`;
-      this.files.set(id, file.data);
-      return id;
-    });
   }
   typing() {}
 }
 
-type Reply = string | { text: string; stopReason: string } | null;
+/** An answer's text, or how the run ended. */
+type Reply = string | RunOutcome;
 type Answer = (prompt: string) => Promise<Reply> | Reply;
 
 interface FakeSession {
@@ -81,9 +70,12 @@ interface FakeSession {
   allowed: boolean[];
   /** Which of TOOLS each run could call. */
   tools: string[][];
-  entries: unknown[];
-  onScheduled: ((job: ScheduledJob) => void) | undefined;
-  imageStore: ImageStore | undefined;
+  /** The posts marked seen, as the session would record them. */
+  seen: { createAt: number; userIds: Set<string> };
+  onScheduled: (job: ScheduledJob) => void;
+  imageStore: ImageStore;
+  /** Whether the session says it has scheduled jobs pending. */
+  pendingJobs: boolean;
   closed: boolean;
 }
 
@@ -94,8 +86,7 @@ const MODEL: ModelChoice = { provider: 'local', model: 'default', thinkingLevel:
 const TOOLS = ['websearch', 'mcp__parcels__add_observations', 'mcp__parcels__read_graph', 'mcp__home__HassTurnOn'];
 
 /**
- * An agent whose sessions answer each prompt with `answer(prompt)`, fail when it throws, and add no
- * message for `null`. An answer may give its stop reason. Its providers are `anthropic` and `local`,
+ * An agent whose sessions answer each prompt with `answer(prompt)`, and fail when it throws. Its providers are `anthropic` and `local`,
  * which have every model but `missing`. Closing a session waits for `closing`, when given. Threads'
  * images are kept in a directory of their own.
  */
@@ -107,27 +98,25 @@ function fakeAgent(answer: Answer, images: boolean, imageTools: boolean, closing
   /** What happened to sessions, in order. */
   const events: string[] = [];
   const agent: Agent = {
-    imageTools,
     hasSession: (rootId) => prompted.has(rootId),
-    images: (rootId) => imageFiles(join(dir, rootId, 'images')),
     pickModel(ref) {
       const choice = parseModel(ref);
       if (!['anthropic', 'local'].includes(choice.provider)) return undefined;
       if (choice.model === 'missing') throw new Error(`there is no model ${choice.provider}/missing`);
       return choice;
     },
-    async openSession(rootId, { model, allowTools, onScheduled, imageStore }) {
+    async openSession(rootId, { model, allowTools, onScheduled }) {
       events.push(`open ${rootId}`);
-      const entries: unknown[] = [];
-      const record: FakeSession = { model, prompts: [], images: [], allowed: [], tools: [], entries, onScheduled, imageStore, closed: false };
+      const imageStore = new ThreadImages(imageFiles(join(dir, rootId, 'images')));
+      const record: FakeSession = { model, prompts: [], images: [], allowed: [], tools: [], seen: { createAt: 0, userIds: new Set() }, onScheduled, imageStore, pendingJobs: false, closed: false };
       sessions.set(rootId, record);
-      const messages: unknown[] = [];
       const session: ThreadSession = {
         model: model ?? MODEL,
         takesImages: images,
-        get messages() {
-          return messages as ThreadSession['messages'];
-        },
+        images: imageStore,
+        keepsImages: images || imageTools,
+        hasPendingJobs: () => record.pendingJobs,
+        messages: [],
         async prompt(text, images = []) {
           prompted.add(rootId);
           record.prompts.push(text);
@@ -135,17 +124,17 @@ function fakeAgent(answer: Answer, images: boolean, imageTools: boolean, closing
           record.allowed.push(allowTools('websearch'));
           record.tools.push(TOOLS.filter(allowTools));
           try {
-            const timestamp = Date.now();
             const reply = await answer(text);
-            const { text: answered, stopReason } = typeof reply === 'string' ? { text: reply, stopReason: 'stop' } : (reply ?? {});
-            if (reply !== null) messages.push({ role: 'assistant', stopReason, timestamp, content: [{ type: 'text', text: answered }] });
+            return typeof reply === 'string' ? { stop: 'answered', text: reply } : reply;
           } catch (error) {
-            messages.push({ role: 'assistant', stopReason: 'error', timestamp: Date.now(), errorMessage: (error as Error).message, content: [] });
+            return { stop: 'failed', error: (error as Error).message };
           }
         },
         abort: async () => {},
-        entries: () => entries as SessionEntry[],
-        appendEntry: (customType, data) => void entries.push({ type: 'custom', customType, data }),
+        seen: () => record.seen,
+        markSeen(createAt, userIds) {
+          record.seen = { createAt: Math.max(record.seen.createAt, createAt), userIds: new Set([...record.seen.userIds, ...userIds]) };
+        },
         async close() {
           events.push(`closing ${rootId}`);
           await closing?.();
@@ -452,12 +441,10 @@ test('a failed run is reported in the thread', async () => {
   await threads.close();
 });
 
-test("a run that adds no answer says so, and doesn't post the previous one again", async (t) => {
-  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 25, 16) });
-  const { chat, threads } = setup({ answer: (prompt) => (prompt.includes('first') ? 'ok' : null) });
+test('a run that adds no answer says so', async (t) => {
+  const { chat, threads } = setup({ answer: (prompt) => (prompt.includes('first') ? 'ok' : { stop: 'no answer' }) });
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'first'), { id: 'r1', direct: true }));
   await threads.idle();
-  t.mock.timers.tick(1_000);
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'second')));
   t.mock.method(console, 'warn', () => {});
   await threads.idle();
@@ -466,7 +453,7 @@ test("a run that adds no answer says so, and doesn't post the previous one again
 });
 
 test('an answer cut off at the output limit says so', async () => {
-  const { chat, threads } = setup({ answer: (prompt) => ({ text: prompt.includes('long') ? 'Part of it' : '', stopReason: 'length' }) });
+  const { chat, threads } = setup({ answer: (prompt) => ({ stop: 'cut off', text: prompt.includes('long') ? 'Part of it' : '' }) });
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'a long answer'), { id: 'r1', direct: true }));
   await threads.idle();
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'all reasoning')));
@@ -558,16 +545,11 @@ test('a thread stays open while its session has scheduled jobs pending', async (
   threads.handle(incoming('r1', chat.add('r1', 'u1', 'remind me in 2 hours'), { id: 'r1', direct: true }));
   await threads.idle();
   const session = sessions.get('r1')!;
-  const snapshot = (status: string) => ({
-    type: 'custom',
-    customType: 'scheduler',
-    data: { timers: [{ id: 'j1', prompt: 'Remind', status, expiresAt: Date.now() + 2 * 3_600_000 }] },
-  });
 
-  session.entries.push(snapshot('active'));
+  session.pendingJobs = true;
   t.mock.timers.tick(60_000);
   assert.equal(session.closed, false);
-  session.entries.push(snapshot('cancelled'));
+  session.pendingJobs = false;
   t.mock.timers.tick(60_000);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(session.closed, true);
@@ -599,8 +581,8 @@ const OWL = { type: 'image' as const, mimeType: 'image/webp', data: Buffer.from(
 
 /** Keeps `image` in the thread's store, as generate_image does, and attaches it to the reply. */
 async function generate(session: FakeSession, image: ImageContent): Promise<string> {
-  const name = await session.imageStore!.save('image', image);
-  session.imageStore!.attach(name);
+  const name = await session.imageStore.save('image', image);
+  session.imageStore.attach(name);
   return name;
 }
 
@@ -735,9 +717,9 @@ test("tools get the thread's images by name, posted and generated ones, in this 
     const session = sessions.get('r1')!;
     if (prompt.includes('draw')) {
       await generate(session, FOX);
-      got = await session.imageStore!.get(['image.png', 'garage.png', 'scan.jpg']);
+      got = await session.imageStore.get(['image.png', 'garage.png', 'scan.jpg']);
     } else {
-      got = await session.imageStore!.get(['image.png']);
+      got = await session.imageStore.get(['image.png']);
     }
     return 'ok';
   }, imageTools: true });
@@ -764,7 +746,7 @@ test("tools get nothing from outside the thread's images", async () => {
   const { chat, sessions, threads } = setup({ answer: async (prompt) => {
     if (!prompt.includes('draw')) return 'ok';
     for (const name of ['secret.png', '../../r2/images/secret.png', 'notes.pdf', '.']) {
-      await sessions.get('r1')!.imageStore!.get([name]).then(
+      await sessions.get('r1')!.imageStore.get([name]).then(
         () => errors.push('none'),
         (error: Error) => errors.push(error.message),
       );

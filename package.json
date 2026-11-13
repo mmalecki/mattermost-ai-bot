@@ -43,9 +43,7 @@
     "@mattermost/types": "^11.9.0",
     "@mmalecki/feather-pi-web": "^0.2.0",
     "@silvia-odwyer/photon-node": "^0.3.4",
-    "jiti": "^2.7.0",
-    "micromatch": "^4.0.8",
-    "pi-ate-scheduler": "github:catlain/pi-scheduler#6541484891e7e23eece658b25934faef1358f369"
+    "micromatch": "^4.0.8"
   },
   "overrides": {
     "@mattermost/client": {

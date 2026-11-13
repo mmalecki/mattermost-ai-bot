@@ -1,0 +1,322 @@
+import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after, test } from 'node:test';
+import type { AssistantMessage } from '@earendil-works/pi-ai';
+import { SessionManager } from '@earendil-works/pi-coding-agent';
+import type { Agent } from '../src/agent.ts';
+import { createAgent, runOutcome } from '../src/pi.ts';
+import { loadConfig } from '../src/config.ts';
+import type { ScheduledJob } from '../src/scheduler.ts';
+
+/** The thread `rootId`'s session file, in `dir`, as pi opens it. */
+function sessionFile(dir: string, rootId: string): SessionManager {
+  return SessionManager.open(join(dir, 'sessions', rootId, 'session.jsonl'), join(dir, 'sessions', rootId), dir);
+}
+
+/** Opens the thread's session, with every tool allowed and no scheduled jobs unless `options` say otherwise. */
+function open(agent: Agent, rootId: string, options: Partial<Parameters<Agent['openSession']>[1]> = {}) {
+  return agent.openSession(rootId, { allowTools: () => true, onScheduled: () => {}, ...options });
+}
+
+const dirs: string[] = [];
+after(() => dirs.forEach((dir) => rmSync(dir, { recursive: true, force: true })));
+
+/**
+ * An OpenAI-compatible endpoint that answers every request with "hello", streamed as pi asks for it.
+ * `models` are the models asked for, in order, `tools` the names of the tools each request declared, and
+ * `prompts` each request's first message, the system prompt.
+ */
+async function fakeLlm() {
+  const models: string[] = [];
+  const tools: string[][] = [];
+  const prompts: string[] = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => (body += chunk));
+    req.on('end', () => {
+      const request = JSON.parse(body) as { model: string; tools?: { function: { name: string } }[]; messages: { content: unknown }[] };
+      models.push(request.model);
+      tools.push((request.tools ?? []).map((t) => t.function.name));
+      prompts.push(JSON.stringify(request.messages[0]!.content));
+      const chunk = (delta: object, finish: string | null) =>
+        `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', created: 0, model: 'm', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(`${chunk({ role: 'assistant', content: 'hello' }, null)}${chunk({}, 'stop')}data: [DONE]\n\n`);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  return { url: `http://127.0.0.1:${port}/v1`, models, tools, prompts, close: () => server.close() };
+}
+
+/**
+ * An agent in `dir` on `local/small`, from a models.json that also has `local/large`, which takes images,
+ * with `env` added to its environment.
+ */
+async function localAgent({
+  baseUrl = 'http://127.0.0.1:1/v1',
+  dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-')),
+  env: extraEnv = {},
+  mcp = {},
+}: { baseUrl?: string; dir?: string; env?: Record<string, string>; mcp?: object } = {}) {
+  dirs.push(dir);
+  const models = [
+    { id: 'small', contextWindow: 8192, reasoning: true },
+    { id: 'large', contextWindow: 8192, reasoning: true, input: ['text', 'image'] },
+  ];
+  writeFileSync(join(dir, 'models.json'), JSON.stringify({ providers: { local: { baseUrl, api: 'openai-completions', apiKey: 'none', models } } }));
+  writeFileSync(join(dir, 'mcp.json'), JSON.stringify(mcp));
+  const env = { MATTERMOST_URL: 'http://mm.local', MATTERMOST_TOKEN: 'mm', MODEL: 'local/small', MCP_CONFIG: join(dir, 'mcp.json'), DATA_DIR: dir, ...extraEnv };
+  return { agent: await createAgent(loadConfig(env), 'sailor'), dir };
+}
+
+test('picks models pi knows, and only names providers it knows as models', async () => {
+  const { agent } = await localAgent();
+  assert.deepEqual(agent.pickModel('local/large:high'), { provider: 'local', model: 'large', thinkingLevel: 'high' });
+  assert.equal(agent.pickModel('etc/hosts'), undefined);
+  assert.equal(agent.pickModel('/local/large'), undefined);
+  assert.throws(() => agent.pickModel('local/huge'), /^Error: there is no model local\/huge$/);
+});
+
+test('a session runs on the model it was created with, MODEL by default', async (t) => {
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent, dir } = await localAgent({ baseUrl: llm.url });
+  const options = { allowTools: () => false };
+  const large = { provider: 'local', model: 'large', thinkingLevel: 'high' } as const;
+
+  let session = await open(agent, 'r1', { ...options, model: large });
+  assert.deepEqual([session.model, session.takesImages], [large, true]);
+  // A thread has a session once it has been prompted, as pi writes its file then.
+  assert.equal(agent.hasSession('r1'), false);
+  assert.deepEqual(await session.prompt('hi'), { stop: 'answered', text: 'hello' });
+  assert.equal(agent.hasSession('r1'), true);
+  // In the thread's own directory.
+  assert.ok(existsSync(join(dir, 'sessions', 'r1', 'session.jsonl')));
+  await session.close();
+
+  session = await open(agent, 'r1', options);
+  assert.deepEqual([session.model, session.takesImages], [large, true]);
+  await session.close();
+
+  session = await open(agent, 'r2', options);
+  assert.deepEqual([session.model, session.takesImages], [{ provider: 'local', model: 'small', thinkingLevel: 'off' }, false]);
+  await session.close();
+  assert.deepEqual(llm.models, ['large']);
+
+  // A restarted bot finds the threads that have sessions on disk.
+  const { agent: restarted } = await localAgent({ baseUrl: llm.url, dir });
+  assert.deepEqual([restarted.hasSession('r1'), restarted.hasSession('r2')], [true, false]);
+});
+
+test('the model is declared only the tools the thread may use, which stay away until the session is reopened', async (t) => {
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent } = await localAgent({ baseUrl: llm.url });
+  let allowed = (_name: string) => true;
+  const session = await open(agent, 'r1', { allowTools: (name) => allowed(name) });
+  await session.prompt('hi');
+  assert.ok(llm.tools[0]!.includes('webfetch'));
+
+  allowed = (name) => name !== 'webfetch';
+  await session.prompt('fetch this');
+  assert.deepEqual(llm.tools[1], llm.tools[0]!.filter((name) => name !== 'webfetch'));
+
+  allowed = () => true;
+  await session.prompt('and again');
+  assert.deepEqual(llm.tools[2], llm.tools[1]);
+  await session.close();
+
+  // A reopened session declares its tools afresh, and they are taken away again as needed.
+  const reopened = await open(agent, 'r1', { allowTools: (name) => allowed(name) });
+  await reopened.prompt('now?');
+  assert.deepEqual(llm.tools[3], llm.tools[0]);
+  allowed = (name) => name !== 'webfetch';
+  await reopened.prompt('and now?');
+  assert.deepEqual(llm.tools[4], llm.tools[1]);
+  await reopened.close();
+});
+
+test('SCHEDULER gives sessions the schedule tool, and tells the model how due jobs reach it', async (t) => {
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent } = await localAgent({ baseUrl: llm.url, env: { SCHEDULER: 'true' } });
+  const session = await open(agent, 'r1');
+  await session.prompt('hi');
+  assert.ok(llm.tools[0]!.includes('schedule'));
+  assert.match(llm.prompts[0]!, /Scheduled job <id> is due/);
+  await session.close();
+});
+
+test("the system prompt tells the model only about the tools the thread may use, and not pi's cwd", async (t) => {
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent } = await localAgent({ baseUrl: llm.url });
+  let allowed = (_name: string) => true;
+  const session = await open(agent, 'r1', { model: { provider: 'local', model: 'large', thinkingLevel: 'off' }, allowTools: (name) => allowed(name) });
+  await session.prompt('hi');
+  assert.ok(llm.tools[0]!.includes('crop_image'));
+  assert.match(llm.prompts[0]!, /You are @sailor/);
+  assert.match(llm.prompts[0]!, /cut it out with crop_image/);
+  assert.doesNotMatch(llm.prompts[0]!, /<cwd>/);
+
+  allowed = (name) => name !== 'crop_image';
+  await session.prompt('crop this');
+  assert.ok(!llm.tools[1]!.includes('crop_image'));
+  assert.match(llm.prompts[1]!, /You are @sailor/);
+  assert.doesNotMatch(llm.prompts[1]!, /crop_image|<cwd>/);
+  await session.close();
+
+  // A thread that never had the tool isn't told of it from its first request.
+  const restricted = await open(agent, 'r2', { model: { provider: 'local', model: 'large', thinkingLevel: 'off' }, allowTools: (name) => name !== 'crop_image' });
+  await restricted.prompt('hi');
+  assert.ok(!llm.tools[2]!.includes('crop_image'));
+  assert.match(llm.prompts[2]!, /You are @sailor/);
+  assert.doesNotMatch(llm.prompts[2]!, /crop_image/);
+  await restricted.close();
+});
+
+test('VISION_MODEL gives sessions the vision tools, and must take images', async (t) => {
+  await assert.rejects(localAgent({ env: { VISION_MODEL: 'local/small' } }), /VISION_MODEL local\/small doesn't take images/);
+  await assert.rejects(localAgent({ env: { VISION_MODEL: 'local/huge' } }), /VISION_MODEL local\/huge is neither in pi's catalog/);
+
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent } = await localAgent({ baseUrl: llm.url, env: { VISION_MODEL: 'local/large:low' } });
+  const session = await open(agent, 'r1');
+  // The model doesn't see images, but the vision tools take them.
+  assert.equal(session.keepsImages, true);
+  await session.prompt('hi');
+  for (const tool of ['look_at_image', 'locate', 'crop_image']) assert.ok(llm.tools[0]!.includes(tool), tool);
+  await session.close();
+
+  // A model that sees images looks at them itself.
+  const seeing = await open(agent, 'r2', { model: { provider: 'local', model: 'large', thinkingLevel: 'off' } });
+  await seeing.prompt('hi');
+  assert.deepEqual(['look_at_image', 'locate', 'crop_image'].map((tool) => llm.tools[1]!.includes(tool)), [false, true, true]);
+  await seeing.close();
+
+  const plain = await open((await localAgent()).agent, 'r1');
+  assert.equal(plain.keepsImages, false);
+  await plain.close();
+});
+
+test('a model that sees images can crop them without VISION_MODEL', async (t) => {
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent } = await localAgent({ baseUrl: llm.url });
+  for (const model of ['large', 'small']) {
+    const session = await open(agent, model, { model: { provider: 'local', model, thinkingLevel: 'off' } });
+    await session.prompt('hi');
+    await session.close();
+  }
+  assert.deepEqual(llm.tools.map((tools) => ['look_at_image', 'locate', 'crop_image'].filter((tool) => tools.includes(tool))), [['crop_image'], []]);
+});
+
+/**
+ * A stdio MCP server without tools, run as `node <file> <dir>`, which writes its pid to `<dir>/started`
+ * once it's connected, and `<dir>/stopped` when it's shut down.
+ */
+const PROBE_SERVER = `
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { createInterface } from 'node:readline';
+const dir = process.argv[2];
+const send = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\\n');
+createInterface({ input: process.stdin }).on('line', (line) => {
+  const { id, method, params } = JSON.parse(line);
+  if (method === 'initialize') send(id, { protocolVersion: params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'probe', version: '1' } });
+  else if (method === 'notifications/initialized') writeFileSync(join(dir, 'started'), String(process.pid));
+  else if (id !== undefined) send(id, method === 'tools/list' ? { tools: [] } : {});
+});
+const stop = () => { writeFileSync(join(dir, 'stopped'), ''); process.exit(0); };
+process.stdin.on('end', stop);
+process.on('SIGTERM', stop);
+`;
+
+/** Resolves once `done()` is true, checking every 20 ms for up to 10 seconds. */
+async function until(done: () => boolean): Promise<void> {
+  for (const started = Date.now(); !done(); await new Promise((resolve) => setTimeout(resolve, 20))) {
+    if (Date.now() - started > 10_000) throw new Error('timed out');
+  }
+}
+
+test("closing a session shuts its extensions down, which closes its MCP servers' connections", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-'));
+  writeFileSync(join(dir, 'probe.mjs'), PROBE_SERVER);
+  const probe = { command: process.execPath, args: [join(dir, 'probe.mjs'), dir], exposure: 'direct' };
+  const { agent } = await localAgent({ dir, mcp: { mcpServers: { probe } } });
+  const session = await open(agent, 'r1');
+  await until(() => existsSync(join(dir, 'started')));
+  t.after(() => {
+    if (!existsSync(join(dir, 'stopped'))) process.kill(Number(readFileSync(join(dir, 'started'), 'utf8')));
+  });
+  await session.close();
+  await until(() => existsSync(join(dir, 'stopped')));
+});
+
+test("a reopened session's scheduled jobs come due again, and keep it open only while the scheduler is on", async (t) => {
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent, dir } = await localAgent({ baseUrl: llm.url, env: { SCHEDULER: 'true' } });
+  // pi writes the session file once it's prompted.
+  const first = await open(agent, 'r1');
+  await first.prompt('hi');
+  await first.close();
+  const job = { id: 'j1', prompt: 'Check the garage', intervalMs: 5_000, recurring: false, expiresAt: Date.now() + 3_000 };
+  sessionFile(dir, 'r1').appendCustomEntry('scheduler', { timers: [job] });
+
+  // Without the scheduler, the job never comes due, so it doesn't keep the session open.
+  const { agent: unscheduled } = await localAgent({ baseUrl: llm.url, dir });
+  const plain = await open(unscheduled, 'r1');
+  assert.equal(plain.hasPendingJobs(), false);
+  await plain.close();
+
+  const due: ScheduledJob[] = [];
+  const reopened = await open(agent, 'r1', { onScheduled: (job) => due.push(job) });
+  assert.equal(reopened.hasPendingJobs(), true);
+  await until(() => due.length > 0);
+  assert.deepEqual(due, [{ id: 'j1', prompt: 'Check the garage' }]);
+  assert.equal(reopened.hasPendingJobs(), false);
+  await reopened.close();
+});
+
+test('tells how a run ended from its final answer, and never takes an earlier run\'s for it', () => {
+  const startedAt = Date.UTC(2026, 9, 25, 16);
+  const answer = (stopReason: string, text = '', extra: object = {}) =>
+    ({ role: 'assistant', stopReason, timestamp: startedAt + 500, content: text ? [{ type: 'text', text }] : [], ...extra }) as unknown as AssistantMessage;
+  const user = { role: 'user', content: 'hi', timestamp: startedAt } as const;
+
+  assert.deepEqual(runOutcome([user, answer('stop', ' Done. ')], startedAt), { stop: 'answered', text: 'Done.' });
+  assert.deepEqual(runOutcome([user, answer('toolUse', 'Looking.'), answer('stop')], startedAt), { stop: 'answered', text: '' });
+  assert.deepEqual(runOutcome([user, answer('length', 'Part of it')], startedAt), { stop: 'cut off', text: 'Part of it' });
+  assert.deepEqual(runOutcome([user, answer('length')], startedAt), { stop: 'cut off', text: '' });
+  assert.deepEqual(runOutcome([user, answer('error', '', { errorMessage: 'rate limited' })], startedAt), { stop: 'failed', error: 'rate limited' });
+  assert.deepEqual(runOutcome([user, answer('aborted')], startedAt), { stop: 'failed', error: 'aborted' });
+  assert.deepEqual(runOutcome([user], startedAt), { stop: 'no answer' });
+  // The last answer is an earlier run's, as when pi dropped this one's to compact, and didn't retry.
+  const earlier = { ...answer('stop', 'Old answer'), timestamp: startedAt - 60_000 };
+  assert.deepEqual(runOutcome([earlier, user], startedAt), { stop: 'no answer' });
+});
+
+test('the posts marked seen are kept in the session file, as earlier versions kept them', async (t) => {
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent, dir } = await localAgent({ baseUrl: llm.url });
+  const first = await open(agent, 'r1');
+  assert.deepEqual(first.seen(), { createAt: 0, userIds: new Set() });
+  first.markSeen(1_000, ['u1', 'u2', 'u1']);
+  await first.prompt('hi');
+  first.markSeen(2_000, ['u3']);
+  await first.close();
+
+  const reopened = await open(agent, 'r1');
+  assert.deepEqual(reopened.seen(), { createAt: 2_000, userIds: new Set(['u1', 'u2', 'u3']) });
+  await reopened.close();
+  const entries = sessionFile(dir, 'r1').getEntries().filter((e) => e.type === 'custom' && e.customType === 'mattermost');
+  assert.deepEqual(entries.map((e) => (e as { data: unknown }).data), [{ createAt: 1_000, userIds: ['u1', 'u2'] }, { createAt: 2_000, userIds: ['u3'] }]);
+});
