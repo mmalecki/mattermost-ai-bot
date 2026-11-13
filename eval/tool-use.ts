@@ -14,7 +14,7 @@ import { parseArgs } from 'node:util';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import { createAgent } from '../src/pi.ts';
 import { loadConfig } from '../src/config.ts';
-import { formatPosts } from '../src/threads.ts';
+import { formatPosts } from '../src/input.ts';
 
 interface Case {
   name: string;

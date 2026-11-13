@@ -1,11 +1,10 @@
 import type { ImageContent } from '@earendil-works/pi-ai';
 import type { Agent, RunOutcome, Seen, ThreadSession } from './agent.ts';
-import type { Chat, IncomingPost, PostFile, ThreadPost } from './chat.ts';
+import type { Chat, IncomingPost, ThreadPost } from './chat.ts';
 import type { AllowedUsers, ModelChoice } from './config.ts';
 import { errorMessage } from './error.ts';
-import { download, imageSource } from './images.ts';
+import { attachments, formatJob, formatPosts, trailingModel } from './input.ts';
 import type { ScheduledJob } from './scheduler.ts';
-import { formatTime } from './time.ts';
 
 export interface ThreadsOptions {
   botUserId: string;
@@ -25,8 +24,6 @@ interface ThreadContext {
 }
 
 const TYPING_INTERVAL_MS = 3_000;
-/** Images handed to the agent with one batch of posts; any more are only named. */
-const MAX_IMAGES = 8;
 
 /**
  * One agent session per thread. Threads start with a DM or a mention of the bot, and from then on
@@ -213,7 +210,7 @@ class Thread {
     session.markSeen(posts.at(-1)!.createAt, posts.map((p) => p.userId));
 
     console.log(`Thread ${this.#rootId}: ${posts.length} new post(s) from ${[...new Set(names)].join(', ')}`);
-    const { lines, images } = await this.#attachments(posts, session);
+    const { lines, images } = await attachments(chat, session, posts, this.#rootId);
     await this.#answer(session, formatPosts(posts, names, lines), images);
   }
 
@@ -231,49 +228,6 @@ class Thread {
     if (!model) return { posts };
     console.log(`Thread ${this.#rootId}: runs on ${model.provider}/${model.model} (thinking ${model.thinkingLevel})`);
     return { model, posts: posts.with(i, { ...posts[i]!, message: picked.message }) };
-  }
-
-  /**
-   * The posts' files: lines naming each, and the images the model can see, in the order of their
-   * lines, if it takes images. Images are kept in the thread when the session keeps them, and named
-   * as they're kept. A file that can't be handed over is only named, so answering doesn't fail on it.
-   */
-  async #attachments(posts: ThreadPost[], session: ThreadSession): Promise<{ lines: string[][]; images: ImageContent[] }> {
-    const images: ImageContent[] = [];
-    const lines: string[][] = [];
-    for (const post of posts) {
-      const postLines: string[] = [];
-      for (const file of post.files) {
-        const image = file.mimeType.startsWith('image/');
-        if (image && session.keepsImages) postLines.push(await this.#image(file, images, session));
-        else postLines.push(fileLine(file));
-      }
-      lines.push(postLines);
-    }
-    return { lines, images };
-  }
-
-  /**
-   * Keeps the image in the session's images, and returns its line, with the name it's kept under. When
-   * the model takes images, adds it to `images` too.
-   */
-  async #image(file: PostFile, images: ImageContent[], session: ThreadSession): Promise<string> {
-    const source = imageSource(file);
-    if (!source) return `[image: ${file.name}, not shown: too large, or in a format you can't see]`;
-    let image: ImageContent;
-    let name: string;
-    try {
-      image = await download(this.#context.chat, file.id, source);
-      name = await session.images.save(file.name, image);
-    } catch (error) {
-      console.warn(`Thread ${this.#rootId}: image ${file.id} couldn't be downloaded:`, errorMessage(error));
-      return `[image: ${file.name}, not shown: it couldn't be downloaded]`;
-    }
-    // The model can't see it, but tools can still take it.
-    if (!session.takesImages) return `[image: ${name}, which you can't see]`;
-    if (images.length >= MAX_IMAGES) return `[image: ${name}, not shown: too many images at once]`;
-    images.push(image);
-    return `[image ${images.length}: ${name}]`;
   }
 
   async #runJob(session: ThreadSession, job: ScheduledJob): Promise<void> {
@@ -323,35 +277,6 @@ class Thread {
     }, this.#context.options.idleMs);
     this.#idleTimer.unref();
   }
-}
-
-/**
- * `message` without its last word, when that is `/provider/model[:thinking]`, and the word without
- * its slash. Whether it names a model is the agent's to say.
- */
-export function trailingModel(message: string): { message: string; ref: string } | undefined {
-  const match = /(?:^|\s)\/(\S+\/\S+)\s*$/.exec(message);
-  if (!match) return undefined;
-  return { message: message.slice(0, match.index).trimEnd(), ref: match[1]! };
-}
-
-/** A file the model only learns the name of. */
-function fileLine(file: PostFile): string {
-  return `[file: ${file.name} (${file.mimeType || 'unknown type'}), which you can't open]`;
-}
-
-/** `attachments` are each post's lines for its files, so a post with only a file isn't empty. */
-export function formatPosts(posts: ThreadPost[], names: string[], attachments: string[][] = []): string {
-  return posts
-    .map((p, i) => {
-      const text = [p.message, ...(attachments[i] ?? [])].filter(Boolean).join('\n');
-      return `@${names[i]} (${formatTime(p.createAt)}, post ${p.id}): ${text}`;
-    })
-    .join('\n\n');
-}
-
-export function formatJob(job: ScheduledJob, now: number): string {
-  return `Scheduled job ${job.id} is due (${formatTime(now)}): ${job.prompt}`;
 }
 
 /** What's posted for how a run ended: its answer, or what went wrong. Nothing, for an empty answer. */
