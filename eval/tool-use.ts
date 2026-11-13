@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
-import { createAgent } from '../src/agent.ts';
+import { createAgent } from '../src/pi.ts';
 import { loadConfig } from '../src/config.ts';
 import { formatPosts } from '../src/threads.ts';
 

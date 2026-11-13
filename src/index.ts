@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import './env.ts';
-import { createAgent } from './agent.ts';
+import { createAgent } from './pi.ts';
 import { loadConfig } from './config.ts';
 import { Mattermost } from './mattermost.ts';
 import { Threads } from './threads.ts';
