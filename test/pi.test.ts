@@ -6,10 +6,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
+import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { Agent } from '../src/agent.ts';
 import { createAgent, runOutcome } from '../src/pi.ts';
 import { loadConfig } from '../src/config.ts';
 import type { ScheduledJob } from '../src/scheduler.ts';
+
+/** The thread `rootId`'s session file, in `dir`, as pi opens it. */
+function sessionFile(dir: string, rootId: string): SessionManager {
+  return SessionManager.open(join(dir, 'sessions', rootId, 'session.jsonl'), join(dir, 'sessions', rootId), dir);
+}
 
 /** Opens the thread's session, with every tool allowed and no scheduled jobs unless `options` say otherwise. */
 function open(agent: Agent, rootId: string, options: Partial<Parameters<Agent['openSession']>[1]> = {}) {
@@ -260,8 +266,9 @@ test("a reopened session's scheduled jobs come due again, and keep it open only 
   // pi writes the session file once it's prompted.
   const first = await open(agent, 'r1');
   await first.prompt('hi');
-  first.appendEntry('scheduler', { timers: [{ id: 'j1', prompt: 'Check the garage', intervalMs: 5_000, recurring: false, expiresAt: Date.now() + 3_000 }] });
   await first.close();
+  const job = { id: 'j1', prompt: 'Check the garage', intervalMs: 5_000, recurring: false, expiresAt: Date.now() + 3_000 };
+  sessionFile(dir, 'r1').appendCustomEntry('scheduler', { timers: [job] });
 
   // Without the scheduler, the job never comes due, so it doesn't keep the session open.
   const { agent: unscheduled } = await localAgent({ baseUrl: llm.url, dir });
@@ -294,4 +301,22 @@ test('tells how a run ended from its final answer, and never takes an earlier ru
   // The last answer is an earlier run's, as when pi dropped this one's to compact, and didn't retry.
   const earlier = { ...answer('stop', 'Old answer'), timestamp: startedAt - 60_000 };
   assert.deepEqual(runOutcome([earlier, user], startedAt), { stop: 'no answer' });
+});
+
+test('the posts marked seen are kept in the session file, as earlier versions kept them', async (t) => {
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent, dir } = await localAgent({ baseUrl: llm.url });
+  const first = await open(agent, 'r1');
+  assert.deepEqual(first.seen(), { createAt: 0, userIds: new Set() });
+  first.markSeen(1_000, ['u1', 'u2', 'u1']);
+  await first.prompt('hi');
+  first.markSeen(2_000, ['u3']);
+  await first.close();
+
+  const reopened = await open(agent, 'r1');
+  assert.deepEqual(reopened.seen(), { createAt: 2_000, userIds: new Set(['u1', 'u2', 'u3']) });
+  await reopened.close();
+  const entries = sessionFile(dir, 'r1').getEntries().filter((e) => e.type === 'custom' && e.customType === 'mattermost');
+  assert.deepEqual(entries.map((e) => (e as { data: unknown }).data), [{ createAt: 1_000, userIds: ['u1', 'u2'] }, { createAt: 2_000, userIds: ['u3'] }]);
 });

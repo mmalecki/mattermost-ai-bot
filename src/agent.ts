@@ -1,6 +1,6 @@
 // What threads need of the agent, which pi provides: a session for each thread.
 import type { ImageContent } from '@earendil-works/pi-ai';
-import type { AgentSession, SessionEntry } from '@earendil-works/pi-coding-agent';
+import type { AgentSession } from '@earendil-works/pi-coding-agent';
 import type { ModelChoice } from './config.ts';
 import type { ThreadImages } from './images.ts';
 import type { ScheduledJob } from './scheduler.ts';
@@ -49,12 +49,21 @@ export interface ThreadSession {
   prompt(text: string, images?: ImageContent[]): Promise<RunOutcome>;
   /** Stops the run in progress. */
   abort(): Promise<void>;
-  /** The session file's entries, oldest first. */
-  entries(): SessionEntry[];
-  /** Records `data` in the session file, outside the model's context. */
-  appendEntry(customType: string, data: unknown): void;
+  /** The posts handed to the agent so far, as markSeen() recorded them. */
+  seen(): Seen;
+  /**
+   * Records in the session file, outside the model's context, that the posts up to `createAt`, by
+   * `userIds`, were handed to the agent.
+   */
+  markSeen(createAt: number, userIds: Iterable<string>): void;
   /** Shuts down the session's extensions, which closes their connections and timers, and disposes it. */
   close(): Promise<void>;
+}
+
+/** The posts handed to the agent so far: when the newest was made, and who wrote them all. */
+export interface Seen {
+  createAt: number;
+  userIds: ReadonlySet<string>;
 }
 
 /** How a run ended, as far as the thread's reply goes. */

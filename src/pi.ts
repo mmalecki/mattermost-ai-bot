@@ -10,10 +10,11 @@ import {
   createToolSearchExtension,
   DefaultResourceLoader,
   ModelRuntime,
+  type SessionEntry,
   SessionManager,
   SettingsManager,
 } from '@earendil-works/pi-coding-agent';
-import type { Agent, RunOutcome } from './agent.ts';
+import type { Agent, RunOutcome, Seen } from './agent.ts';
 import { type Config, type ModelChoice, parseModel } from './config.ts';
 import { textOf } from './content.ts';
 import { errorMessage } from './error.ts';
@@ -24,6 +25,16 @@ import { mcpImages, mcpServers } from './mcp.ts';
 import { buildSystemPrompt, threadPrompt } from './prompt.ts';
 import { scheduler } from './scheduler.ts';
 import { imageCrop, VISION_TOOLS, vision } from './vision.ts';
+
+/** The session entry recording the posts handed to the agent, which isn't part of the model's context. */
+const SEEN_ENTRY = 'mattermost';
+
+interface SeenEntry {
+  /** The newest post's. */
+  createAt: number;
+  /** The posts' authors. */
+  userIds: string[];
+}
 
 // Published as TypeScript, which Node won't strip under node_modules, so pi loads it like any
 // installed pi package.
@@ -228,8 +239,8 @@ export async function createAgent(config: Config, botUsername: string): Promise<
           return runOutcome(session.messages, startedAt);
         },
         abort: () => session.abort(),
-        entries: () => session.sessionManager.getEntries(),
-        appendEntry: (customType, data) => session.sessionManager.appendCustomEntry(customType, data),
+        seen: () => seenPosts(session.sessionManager.getEntries()),
+        markSeen: (createAt, userIds) => session.sessionManager.appendCustomEntry(SEEN_ENTRY, { createAt, userIds: [...new Set(userIds)] } satisfies SeenEntry),
         close: () => closeSession(session),
       };
     },
@@ -248,4 +259,17 @@ export function runOutcome(messages: readonly AgentSession['messages'][number][]
   if (message.stopReason === 'error' || message.stopReason === 'aborted') return { stop: 'failed', error: message.errorMessage ?? message.stopReason };
   const text = textOf(message.content).trim();
   return { stop: message.stopReason === 'length' ? 'cut off' : 'answered', text };
+}
+
+/** The posts handed to the agent so far, from every entry that recorded some. */
+function seenPosts(entries: SessionEntry[]): Seen {
+  let createAt = 0;
+  const userIds = new Set<string>();
+  for (const entry of entries) {
+    if (entry.type !== 'custom' || entry.customType !== SEEN_ENTRY) continue;
+    const seen = entry.data as SeenEntry;
+    createAt = Math.max(createAt, seen.createAt);
+    for (const id of seen.userIds) userIds.add(id);
+  }
+  return { createAt, userIds };
 }

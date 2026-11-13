@@ -1,5 +1,5 @@
 import type { ImageContent } from '@earendil-works/pi-ai';
-import type { Agent, RunOutcome, ThreadSession } from './agent.ts';
+import type { Agent, RunOutcome, Seen, ThreadSession } from './agent.ts';
 import type { Chat, IncomingPost, PostFile, ThreadPost } from './chat.ts';
 import type { AllowedUsers, ModelChoice } from './config.ts';
 import { errorMessage } from './error.ts';
@@ -22,16 +22,6 @@ interface ThreadContext {
   agent: Agent;
   chat: Chat;
   options: ThreadsOptions;
-}
-
-/** Session entry recording the posts handed to the agent. Not part of the model's context. */
-const SEEN_ENTRY = 'mattermost';
-
-interface SeenEntry {
-  /** The newest post's. */
-  createAt: number;
-  /** The posts' authors. */
-  userIds: string[];
 }
 
 const TYPING_INTERVAL_MS = 3_000;
@@ -198,7 +188,7 @@ class Thread {
     const { agent, chat } = this.#context;
     // A new thread's posts may pick its model, so its session waits for them.
     const isNew = !this.#session && !agent.hasSession(this.#rootId);
-    const seen = isNew ? { createAt: 0, userIds: new Set<string>() } : seenPosts(await this.#open());
+    const seen: Seen = isNew ? { createAt: 0, userIds: new Set() } : (await this.#open()).seen();
     const unseen = (await chat.threadPosts(this.#rootId)).filter((p) => p.createAt > seen.createAt);
     if (!unseen.length) return;
     let picked: { model?: ModelChoice; posts: ThreadPost[] };
@@ -220,8 +210,7 @@ class Thread {
     const names = await Promise.all(posts.map((p) => chat.username(p.userId).catch(() => p.userId)));
     await this.#allowTools(seen, posts.map((p) => p.userId));
     // Recorded first, so a failing run doesn't send the same posts again.
-    const entry: SeenEntry = { createAt: posts.at(-1)!.createAt, userIds: [...new Set(posts.map((p) => p.userId))] };
-    session.appendEntry(SEEN_ENTRY, entry);
+    session.markSeen(posts.at(-1)!.createAt, posts.map((p) => p.userId));
 
     console.log(`Thread ${this.#rootId}: ${posts.length} new post(s) from ${[...new Set(names)].join(', ')}`);
     const { lines, images } = await this.#attachments(posts, session);
@@ -289,7 +278,7 @@ class Thread {
 
   async #runJob(session: ThreadSession, job: ScheduledJob): Promise<void> {
     // No thread fetch: posts are answered before jobs in a run, so their authors are in the session.
-    await this.#allowTools(seenPosts(session), []);
+    await this.#allowTools(session.seen(), []);
     console.log(`Thread ${this.#rootId}: scheduled job ${job.id} is due`);
     await this.#answer(session, formatJob(job, Date.now()));
   }
@@ -334,24 +323,6 @@ class Thread {
     }, this.#context.options.idleMs);
     this.#idleTimer.unref();
   }
-}
-
-/** The posts handed to the agent so far, as seenPosts() reads them back. */
-interface Seen {
-  createAt: number;
-  userIds: Set<string>;
-}
-
-function seenPosts(session: ThreadSession): Seen {
-  let createAt = 0;
-  const userIds = new Set<string>();
-  for (const entry of session.entries()) {
-    if (entry.type !== 'custom' || entry.customType !== SEEN_ENTRY) continue;
-    const seen = entry.data as SeenEntry;
-    createAt = Math.max(createAt, seen.createAt);
-    for (const id of seen.userIds) userIds.add(id);
-  }
-  return { createAt, userIds };
 }
 
 /**

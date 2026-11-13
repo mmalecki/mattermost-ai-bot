@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import type { ImageContent } from '@earendil-works/pi-ai';
-import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import type { Agent, RunOutcome, ThreadSession } from '../src/agent.ts';
 import { type ModelChoice, parseAllowedUsers, parseModel } from '../src/config.ts';
 import { type ImageStore, imageFiles, ThreadImages } from '../src/images.ts';
@@ -71,7 +70,8 @@ interface FakeSession {
   allowed: boolean[];
   /** Which of TOOLS each run could call. */
   tools: string[][];
-  entries: unknown[];
+  /** The posts marked seen, as the session would record them. */
+  seen: { createAt: number; userIds: Set<string> };
   onScheduled: (job: ScheduledJob) => void;
   imageStore: ImageStore;
   /** Whether the session says it has scheduled jobs pending. */
@@ -108,8 +108,7 @@ function fakeAgent(answer: Answer, images: boolean, imageTools: boolean, closing
     async openSession(rootId, { model, allowTools, onScheduled }) {
       events.push(`open ${rootId}`);
       const imageStore = new ThreadImages(imageFiles(join(dir, rootId, 'images')));
-      const entries: unknown[] = [];
-      const record: FakeSession = { model, prompts: [], images: [], allowed: [], tools: [], entries, onScheduled, imageStore, pendingJobs: false, closed: false };
+      const record: FakeSession = { model, prompts: [], images: [], allowed: [], tools: [], seen: { createAt: 0, userIds: new Set() }, onScheduled, imageStore, pendingJobs: false, closed: false };
       sessions.set(rootId, record);
       const session: ThreadSession = {
         model: model ?? MODEL,
@@ -132,8 +131,10 @@ function fakeAgent(answer: Answer, images: boolean, imageTools: boolean, closing
           }
         },
         abort: async () => {},
-        entries: () => entries as SessionEntry[],
-        appendEntry: (customType, data) => void entries.push({ type: 'custom', customType, data }),
+        seen: () => record.seen,
+        markSeen(createAt, userIds) {
+          record.seen = { createAt: Math.max(record.seen.createAt, createAt), userIds: new Set([...record.seen.userIds, ...userIds]) };
+        },
         async close() {
           events.push(`closing ${rootId}`);
           await closing?.();
