@@ -37,6 +37,8 @@ export interface ThreadSession {
   readonly model: ModelChoice;
   /** Whether that model takes images. */
   readonly takesImages: boolean;
+  /** That model's context window, in tokens. */
+  readonly contextWindow: number;
   /** The thread's images, kept in its directory: posted ones, and those tools made and returned. */
   readonly images: ThreadImages;
   /** Whether posts' images are kept in `images`: when the model or some tool takes them. */

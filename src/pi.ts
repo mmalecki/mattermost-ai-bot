@@ -226,6 +226,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
       return {
         model: { provider: model.provider, model: model.id, thinkingLevel },
         takesImages: images,
+        contextWindow: model.contextWindow,
         images: imageStore,
         keepsImages,
         hasPendingJobs: () => jobs?.hasPendingJobs() ?? false,
