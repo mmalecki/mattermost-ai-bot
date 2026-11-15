@@ -89,6 +89,17 @@ interface SeenEntry {
 const TYPING_INTERVAL_MS = 3_000;
 /** Images handed to the agent with one batch of posts; any more are only named. */
 const MAX_IMAGES = 8;
+/**
+ * Text handed to the agent with one batch of posts, in bytes, and no more than the model's context
+ * window in tokens: a token is some 4 bytes of text, so that is up to a quarter of it. Files past it
+ * are cut off, or only named once it's used up.
+ */
+const MAX_TEXT_BYTES = 256 * 1024;
+/** Larger text files are only named: they're downloaded whole, to be cut off. */
+const MAX_TEXT_FILE_BYTES = 10 * 1024 * 1024;
+/** Besides text/*. Files with no type, or a generic one, are taken for text if they decode as such. */
+const TEXT_TYPES = /^application\/(json|xml|yaml|x-yaml|toml|sql|javascript|x-sh|x-ndjson|[\w.-]+\+(json|xml))$/;
+const UNKNOWN_TYPES = new Set(['', 'application/octet-stream']);
 
 /**
  * One agent session per thread. Threads start with a DM or a mention of the bot, and from then on
@@ -276,7 +287,7 @@ class Thread {
     session.appendEntry(SEEN_ENTRY, entry);
 
     console.log(`Thread ${this.#rootId}: ${posts.length} new post(s) from ${[...new Set(names)].join(', ')}`);
-    const { lines, images } = await this.#attachments(posts, session.takesImages);
+    const { lines, images } = await this.#attachments(posts, session.takesImages, Math.min(MAX_TEXT_BYTES, session.contextWindow));
     await this.#answer(session, formatPosts(posts, names, lines), images);
   }
 
@@ -297,20 +308,22 @@ class Thread {
   }
 
   /**
-   * The posts' files: lines naming each, and the images the model can see, in the order of their
-   * lines, if it takes `images`. Images are kept in the thread when the model or some tool takes them,
-   * and named as they're kept. A file that can't be handed over is only named, so answering doesn't
-   * fail on it.
+   * The posts' files: lines naming each, with the contents of text files, up to `textBytes` of them in
+   * all, and the images the model can see, in the order of their lines, if it takes `images`. Images are
+   * kept in the thread when the model or some tool takes them, and named as they're kept. A file that
+   * can't be handed over is only named, so answering doesn't fail on it.
    */
-  async #attachments(posts: ThreadPost[], takesImages: boolean): Promise<{ lines: string[][]; images: ImageContent[] }> {
+  async #attachments(posts: ThreadPost[], takesImages: boolean, textBytes: number): Promise<{ lines: string[][]; images: ImageContent[] }> {
     const { agent } = this.#context;
     const images: ImageContent[] = [];
     const lines: string[][] = [];
+    const text = { left: textBytes };
     for (const post of posts) {
       const postLines: string[] = [];
       for (const file of post.files) {
         const image = file.mimeType.startsWith('image/');
         if (image && (takesImages || agent.imageTools)) postLines.push(await this.#image(file, images, takesImages));
+        else if (mayBeText(file)) postLines.push(await this.#text(file, text));
         else postLines.push(fileLine(file));
       }
       lines.push(postLines);
@@ -339,6 +352,29 @@ class Thread {
     if (images.length >= MAX_IMAGES) return `[image: ${name}, not shown: too many images at once]`;
     images.push(image);
     return `[image ${images.length}: ${name}]`;
+  }
+
+  /** The file's contents, between lines naming it, taking what they use from `text.left`. */
+  async #text(file: PostFile, text: { left: number }): Promise<string> {
+    const type = mediaType(file.mimeType);
+    const name = `${file.name} (${type || 'unknown type'})`;
+    if (file.size > MAX_TEXT_FILE_BYTES) return `[file: ${name}, not shown: too large]`;
+    if (text.left <= 0) return `[file: ${name}, not shown: too much text at once]`;
+    let bytes;
+    try {
+      bytes = await this.#context.chat.file(file.id, false);
+    } catch (error) {
+      console.warn(`Thread ${this.#rootId}: file ${file.id} couldn't be downloaded:`, errorMessage(error));
+      return `[file: ${name}, not shown: it couldn't be downloaded]`;
+    }
+    const contents = decodeText(bytes, text.left);
+    // A file of an unknown type that isn't text is one the model couldn't read anyway.
+    if (contents === undefined) return UNKNOWN_TYPES.has(type) ? fileLine(file) : `[file: ${name}, not shown: it isn't text]`;
+    // What's left may end before the file's first character does.
+    if (!contents.bytes && bytes.length) return `[file: ${name}, not shown: too much text at once]`;
+    text.left -= contents.bytes;
+    const end = contents.bytes < bytes.length ? `, cut off after ${formatBytes(contents.bytes)} of ${formatBytes(bytes.length)}` : '';
+    return `[file: ${name}]\n${contents.text}\n[end of file: ${file.name}${end}]`;
   }
 
   async #runJob(session: ThreadSession, job: ScheduledJob): Promise<void> {
@@ -429,6 +465,43 @@ export function trailingModel(message: string): { message: string; ref: string }
   const match = /(?:^|\s)\/(\S+\/\S+)\s*$/.exec(message);
   if (!match) return undefined;
   return { message: message.slice(0, match.index).trimEnd(), ref: match[1]! };
+}
+
+/** A type without its parameters, such as the `; charset=utf-8` Mattermost gives text. */
+function mediaType(mimeType: string): string {
+  return mimeType.split(';')[0]!.trim().toLowerCase();
+}
+
+function mayBeText(file: PostFile): boolean {
+  const type = mediaType(file.mimeType);
+  return type.startsWith('text/') || TEXT_TYPES.test(type) || UNKNOWN_TYPES.has(type);
+}
+
+/**
+ * Up to `max` of `bytes` as UTF-8, cut off at the end of a line when there is one in it, with how many
+ * bytes that kept. Undefined when they aren't text.
+ */
+export function decodeText(bytes: Uint8Array, max: number): { text: string; bytes: number } | undefined {
+  let kept = bytes.subarray(0, max);
+  if (kept.length < bytes.length) {
+    const newline = kept.lastIndexOf(0x0a);
+    if (newline >= 0) kept = kept.subarray(0, newline + 1);
+  }
+  if (kept.includes(0)) return undefined;
+  const cut = kept.length < bytes.length;
+  let text;
+  try {
+    // Streaming, a character split at the cut is left out instead of failing, and not counted as kept.
+    text = new TextDecoder('utf-8', { fatal: true }).decode(kept, { stream: cut });
+  } catch {
+    return undefined;
+  }
+  // Uncut, the count is the file's, with any byte order mark the decoder drops.
+  return { text: text.trimEnd(), bytes: cut ? Buffer.byteLength(text) : bytes.length };
+}
+
+function formatBytes(bytes: number): string {
+  return bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 /** A file the model only learns the name of. */

@@ -9,7 +9,7 @@ import type { Agent, ThreadSession } from '../src/agent.ts';
 import { type ModelChoice, parseAllowedUsers, parseModel } from '../src/config.ts';
 import { imageFiles } from '../src/images.ts';
 import type { ScheduledJob } from '../src/scheduler.ts';
-import { type Chat, type IncomingPost, type OutgoingFile, type PostFile, type ThreadPost, Threads } from '../src/threads.ts';
+import { type Chat, decodeText, type IncomingPost, type OutgoingFile, type PostFile, type ThreadPost, Threads } from '../src/threads.ts';
 import type { ImageStore } from '../src/tools.ts';
 
 const BOT = 'bot';
@@ -96,10 +96,10 @@ const TOOLS = ['websearch', 'mcp__parcels__add_observations', 'mcp__parcels__rea
 /**
  * An agent whose sessions answer each prompt with `answer(prompt)`, fail when it throws, and add no
  * message for `null`. An answer may give its stop reason. Its providers are `anthropic` and `local`,
- * which have every model but `missing`. Closing a session waits for `closing`, when given. Threads'
- * images are kept in a directory of their own.
+ * which have every model but `missing`, of a `contextWindow` in tokens. Closing a session waits for
+ * `closing`, when given. Threads' images are kept in a directory of their own.
  */
-function fakeAgent(answer: Answer, images: boolean, imageTools: boolean, closing?: () => Promise<void>) {
+function fakeAgent(answer: Answer, images: boolean, imageTools: boolean, contextWindow: number, closing?: () => Promise<void>) {
   const sessions = new Map<string, FakeSession>();
   const dir = mkdtempSync(join(tmpdir(), 'mattermost-ai-bot-'));
   dirs.push(dir);
@@ -125,6 +125,7 @@ function fakeAgent(answer: Answer, images: boolean, imageTools: boolean, closing
       const session: ThreadSession = {
         model: model ?? MODEL,
         takesImages: images,
+        contextWindow,
         get messages() {
           return messages as ThreadSession['messages'];
         },
@@ -168,13 +169,15 @@ interface SetupOptions {
   /** Whether some tool takes images. */
   imageTools?: boolean;
   pickModel?: boolean;
+  /** The model's, in tokens. */
+  contextWindow?: number;
   /** Closing a session waits for this. */
   closing?: () => Promise<void>;
 }
 
-function setup({ answer = () => 'ok', allowlist = ['maciej'], images = true, imageTools = false, pickModel = false, closing }: SetupOptions = {}) {
+function setup({ answer = () => 'ok', allowlist = ['maciej'], images = true, imageTools = false, pickModel = false, contextWindow = 128_000, closing }: SetupOptions = {}) {
   const chat = new FakeChat();
-  const { agent, sessions, events } = fakeAgent(answer, images, imageTools, closing);
+  const { agent, sessions, events } = fakeAgent(answer, images, imageTools, contextWindow, closing);
   const threads = new Threads(agent, chat, { botUserId: BOT, allowedUsers: allowlist ? parseAllowedUsers(allowlist) : undefined, idleMs: 60_000, pickModel });
   return { chat, sessions, events, threads };
 }
@@ -319,6 +322,98 @@ test("a model that doesn't take images gets their names only", async () => {
   assert.equal(chat.downloads.length, 0);
   assert.match(sessions.get('r1')!.prompts[0]!, /: \[file: garage\.png \(image\/png\), which you can't open\]$/);
   await threads.close();
+});
+
+function textFile(id: string, name: string, extra: Partial<PostFile> = {}): PostFile {
+  return { id, name, mimeType: 'text/csv; charset=utf-8', size: 100, hasPreview: false, ...extra };
+}
+
+test("text files' contents follow their line, between it and an end line", async () => {
+  const { chat, sessions, threads } = setup({ images: false });
+  chat.files.set('f1', new TextEncoder().encode('day,kWh\nmon,12\n'));
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'sum it up', [textFile('f1', 'power.csv')]), { id: 'r1', direct: true }));
+  await threads.idle();
+  assert.match(sessions.get('r1')!.prompts[0]!, /: sum it up\n\[file: power\.csv \(text\/csv\)\]\nday,kWh\nmon,12\n\[end of file: power\.csv\]$/);
+  await threads.close();
+});
+
+test('a .txt file, as Mattermost types it, is read', async () => {
+  const { chat, sessions, threads } = setup();
+  chat.files.set('f1', new TextEncoder().encode('buy milk\n'));
+  threads.handle(incoming('r1', chat.add('r1', 'u1', '', [textFile('f1', 'notes.txt', { mimeType: 'text/plain; charset=utf-8' })]), { id: 'r1', direct: true }));
+  await threads.idle();
+  assert.match(sessions.get('r1')!.prompts[0]!, /: \[file: notes\.txt \(text\/plain\)\]\nbuy milk\n\[end of file: notes\.txt\]$/);
+  await threads.close();
+});
+
+test('files of no type, or a generic one, are read when they are text, and only named otherwise', async () => {
+  const { chat, sessions, threads } = setup();
+  chat.files.set('f1', new TextEncoder().encode('hello')).set('f2', new Uint8Array([0x50, 0x4b, 0, 3]));
+  const files = [textFile('f1', 'notes', { mimeType: '' }), textFile('f2', 'archive.zip', { mimeType: 'application/octet-stream' })];
+  threads.handle(incoming('r1', chat.add('r1', 'u1', '', files), { id: 'r1', direct: true }));
+  await threads.idle();
+  assert.match(
+    sessions.get('r1')!.prompts[0]!,
+    /: \[file: notes \(unknown type\)\]\nhello\n\[end of file: notes\]\n\[file: archive\.zip \(application\/octet-stream\), which you can't open\]$/,
+  );
+  await threads.close();
+});
+
+test('text past the limit for one batch of posts is cut off at a line end, and later files only named', async () => {
+  // A context window this large leaves the limit to cut text off.
+  const { chat, sessions, threads } = setup({ contextWindow: 1_000_000 });
+  const row = `${'x'.repeat(1023)}\n`;
+  chat.files.set('f1', new TextEncoder().encode(row.repeat(200))).set('f2', new TextEncoder().encode(row.repeat(100))).set('f3', new TextEncoder().encode('hi'));
+  const files = [textFile('f1', 'a.csv'), textFile('f2', 'b.csv'), textFile('f3', 'c.csv')];
+  threads.handle(incoming('r1', chat.add('r1', 'u1', '', files), { id: 'r1', direct: true }));
+  await threads.idle();
+  const prompt = sessions.get('r1')!.prompts[0]!;
+  assert.match(prompt, /x\n\[end of file: a\.csv\]\n\[file: b\.csv \(text\/csv\)\]\n/);
+  assert.match(prompt, /x\n\[end of file: b\.csv, cut off after 56 KB of 100 KB\]\n\[file: c\.csv \(text\/csv\), not shown: too much text at once\]$/);
+  assert.equal(chat.downloads.length, 2);
+  await threads.close();
+});
+
+test("a small model's context window cuts text off sooner", async () => {
+  const { chat, sessions, threads } = setup({ contextWindow: 2048 });
+  chat.files.set('f1', new TextEncoder().encode(`${'x'.repeat(1023)}\n`.repeat(4)));
+  threads.handle(incoming('r1', chat.add('r1', 'u1', '', [textFile('f1', 'a.csv')]), { id: 'r1', direct: true }));
+  await threads.idle();
+  assert.match(sessions.get('r1')!.prompts[0]!, /\[end of file: a\.csv, cut off after 2 KB of 4 KB\]$/);
+  await threads.close();
+});
+
+test("a file that what's left of the text ends before the first character of is only named", async () => {
+  const { chat, sessions, threads } = setup({ contextWindow: 2048 });
+  // a.csv leaves 1 byte, short of b.csv's first character, of 2.
+  chat.files.set('f1', new TextEncoder().encode(`${'x'.repeat(2046)}\n`)).set('f2', new TextEncoder().encode('żółw\n'));
+  threads.handle(incoming('r1', chat.add('r1', 'u1', '', [textFile('f1', 'a.csv'), textFile('f2', 'b.csv')]), { id: 'r1', direct: true }));
+  await threads.idle();
+  assert.match(sessions.get('r1')!.prompts[0]!, /x\n\[end of file: a\.csv\]\n\[file: b\.csv \(text\/csv\), not shown: too much text at once\]$/);
+  await threads.close();
+});
+
+test("text files that are too large, aren't text, or can't be downloaded are only named, and the posts still answered", async () => {
+  const { chat, sessions, threads } = setup();
+  chat.files.set('f1', new Uint8Array([0xff, 0xfe, 0x41])).set('f3', new Uint8Array([1]));
+  const files = [textFile('f1', 'odd.csv'), textFile('f2', 'gone.json', { mimeType: 'application/json' }), textFile('f3', 'huge.log', { mimeType: 'text/plain', size: 50 * 1024 * 1024 })];
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'hm', files), { id: 'r1', direct: true }));
+  await threads.idle();
+  assert.match(
+    sessions.get('r1')!.prompts[0]!,
+    /: hm\n\[file: odd\.csv \(text\/csv\), not shown: it isn't text\]\n\[file: gone\.json \(application\/json\), not shown: it couldn't be downloaded\]\n\[file: huge\.log \(text\/plain\), not shown: too large\]$/,
+  );
+  assert.deepEqual(chat.downloads.map((d) => d.fileId), ['f1', 'f2']);
+  assert.deepEqual(chat.replies.map((r) => r.message), ['ok']);
+  await threads.close();
+});
+
+test('decoding text cut off mid-character leaves the character out', () => {
+  assert.deepEqual(decodeText(new TextEncoder().encode('zażółć'), 5), { text: 'zaż', bytes: 4 });
+  assert.deepEqual(decodeText(new TextEncoder().encode('a\nb'), 2), { text: 'a', bytes: 2 });
+  assert.deepEqual(decodeText(new Uint8Array([0xef, 0xbb, 0xbf, 0x41]), 10), { text: 'A', bytes: 4 });
+  assert.deepEqual(decodeText(new TextEncoder().encode('ż'), 1), { text: '', bytes: 0 });
+  assert.equal(decodeText(new Uint8Array([0x41, 0]), 10), undefined);
 });
 
 test('posts arriving during a run are handed over together afterwards', async () => {
