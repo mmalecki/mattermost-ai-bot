@@ -78,10 +78,15 @@ example in a note it saves somewhere with a tool. Links take the `MATTERMOST_PUB
 ### Images and files
 When the model takes images, as Pi's catalog or `models.json` says (`"input": ["text", "image"]`), the agent sees the
 images attached to posts, scaled down to the model's limits. Up to 8 go with each batch of posts, and images over
-20 MB, or in formats other than PNG, JPEG, GIF and WebP, go as Mattermost's preview of them. The agent only learns the
-names of other files, and of images when the model doesn't take them.
+20 MB, or in formats other than PNG, JPEG, GIF and WebP, go as Mattermost's preview of them.
 
-Images are kept in the thread's session file, and sent with every later run in the thread until it's compacted.
+The agent reads text files, such as plain text, CSV, JSON, YAML, logs or code, and files of no type that turn out to be
+UTF-8 text. Up to 256 KB of text goes with each batch of posts, and no more than the model's context window in tokens,
+some quarter of it: a file past that is cut off, at a line end where there is one, and the agent told so, and later
+ones are only named. Files over 10 MB aren't read. The agent only learns the names of other files, such as PDFs, and of
+images when the model doesn't take them.
+
+Images and text are kept in the thread's session file, and sent with every later run in the thread until it's compacted.
 When the model or some tool takes images, such as `generate_image` below, posts' images are kept in the thread's
 `images/` too, the originals or Mattermost's preview, under the names they're posted with, made new to the thread,
 as `image-2.png` for a second `image.png`. The agent is given the names, seeing the images or not, and passes them to
