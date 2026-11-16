@@ -89,13 +89,19 @@ async function keepImage(chat: Pick<Chat, 'file'>, session: Session, file: PostF
   const source = imageSource(file);
   if (!source) return `[image: ${file.name}, not shown: too large, or in a format you can't see]`;
   let image: ImageContent;
-  let name: string;
   try {
     image = { type: 'image', data: Buffer.from(await chat.file(file.id, source.preview)).toString('base64'), mimeType: source.mimeType };
-    name = await session.images.save(file.name, image);
   } catch (error) {
     console.warn(`Thread ${rootId}: image ${file.id} couldn't be downloaded:`, errorMessage(error));
     return `[image: ${file.name}, not shown: it couldn't be downloaded]`;
+  }
+  let name: string;
+  try {
+    name = await session.images.save(file.name, image);
+  } catch (error) {
+    // Such as with the disk full, or a name too long for a file's.
+    console.warn(`Thread ${rootId}: image ${file.id} couldn't be saved:`, errorMessage(error));
+    return `[image: ${file.name}, not shown: it couldn't be saved]`;
   }
   // The model can't see it, but tools can still take it.
   if (!session.takesImages) return `[image: ${name}, which you can't see]`;
