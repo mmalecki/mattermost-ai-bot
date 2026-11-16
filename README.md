@@ -170,6 +170,10 @@ tools of one server with `direct` exposure, even in a thread where `alice` has p
 }
 ```
 
+A pattern starting with `!` takes tools away from those the user's other patterns give, and gives none itself:
+`["mcp__homeassistant__*", "!mcp__homeassistant__HassTurn*"]` is the server's tools without those that turn things on
+and off, and `["*", "!schedule"]` every tool but `schedule`.
+
 Tool names are as the model sees them: an MCP server's are `mcp__<server>__<tool>`, with characters other than
 letters, digits and `_` in the server's name turned into `_`. The others are `websearch`, `webfetch`, `generate_image`,
 `look_at_image`, `locate`, `crop_image` and `schedule`, and Pi's `codemode` and `tool_search`, which servers with
