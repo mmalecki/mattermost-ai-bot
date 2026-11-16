@@ -197,7 +197,13 @@ export function crop(image: ImageContent, box: Box, margin = 0): { image: ImageC
   if (turn.flipX) [xmin, xmax] = [1000 - xmax, 1000 - xmin];
   if (turn.flipY) [ymin, ymax] = [1000 - ymax, 1000 - ymin];
   if (turn.transpose) [ymin, xmin, ymax, xmax] = [xmin, ymin, xmax, ymax];
-  const source = photon.PhotonImage.new_from_byteslice(bytes);
+  let source: photon.PhotonImage;
+  try {
+    source = photon.PhotonImage.new_from_byteslice(bytes);
+  } catch {
+    // photon only says `unreachable`, which tells the agent nothing.
+    throw new Error("The image can't be decoded, so it can't be cropped: it may be damaged, or in a format other than PNG, JPEG, WebP or GIF");
+  }
   try {
     const width = source.get_width();
     const height = source.get_height();

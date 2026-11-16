@@ -93,6 +93,14 @@ test('crops a box out of an image at its full size, with a margin', () => {
   assert.throws(() => crop(image, [500, 500, 500, 600]), /The box \[500,500,500,600\] is empty/);
 });
 
+test("says so when an image can't be decoded, and crops the next one", () => {
+  // As a tool may return one, kept as the PNG it isn't.
+  const svg: ImageContent = { type: 'image', data: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64'), mimeType: 'image/png' };
+  const cut: ImageContent = { type: 'image', data: png(200, 100).data.slice(0, 60), mimeType: 'image/png' };
+  for (const image of [svg, cut]) assert.throws(() => crop(image, [0, 0, 500, 500]), /^Error: The image can't be decoded, so it can't be cropped: it may be damaged, or in a format other than PNG, JPEG, WebP or GIF$/);
+  assert.equal(crop(png(200, 100), [0, 0, 500, 500]).width, 100);
+});
+
 test('crops a photo as its EXIF orientation turns it upright, which is how pi shows it to the models', async () => {
   const stored = jpeg(200, 100);
   const photo = (orientation: number): ImageContent => ({ type: 'image', data: orientedJpeg(stored, orientation).toString('base64'), mimeType: 'image/jpeg' });
