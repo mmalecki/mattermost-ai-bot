@@ -5,6 +5,7 @@ import type { ModelChoice } from './config.ts';
 import { textOf } from './content.ts';
 import { withList } from './image-tools.ts';
 import type { ImageFiles } from './images.ts';
+import { type Orientation, orientation } from './orientation.ts';
 
 /** The vision tools, which keep the images they make themselves. */
 export const VISION_TOOLS = ['look_at_image', 'locate', 'crop_image'];
@@ -183,28 +184,57 @@ export function parseBoxes(text: string, size: { width: number; height: number }
   });
 }
 
-/** `box`, with `margin` around it, cut out of `image`, at its full size, as a PNG. */
+/**
+ * `box`, with `margin` around it, cut out of `image`, at its full size, as a PNG. The box is of the
+ * image upright, as its EXIF orientation turns it and as pi shows it to the models, and so is the PNG.
+ */
 export function crop(image: ImageContent, box: Box, margin = 0): { image: ImageContent; width: number; height: number } {
   if (box.length !== 4 || !box.every(Number.isFinite)) throw new Error('box must be [ymin, xmin, ymax, xmax], from 0 to 1000');
-  const source = photon.PhotonImage.new_from_byteslice(Buffer.from(image.data, 'base64'));
+  const bytes = Buffer.from(image.data, 'base64');
+  const turn = orientation(bytes);
+  // Turned back, to where the box is in the image as it's stored: only the cutout is turned upright.
+  let [ymin, xmin, ymax, xmax] = box;
+  if (turn.flipX) [xmin, xmax] = [1000 - xmax, 1000 - xmin];
+  if (turn.flipY) [ymin, ymax] = [1000 - ymax, 1000 - ymin];
+  if (turn.transpose) [ymin, xmin, ymax, xmax] = [xmin, ymin, xmax, ymax];
+  const source = photon.PhotonImage.new_from_byteslice(bytes);
   try {
     const width = source.get_width();
     const height = source.get_height();
-    const [ymin, xmin, ymax, xmax] = box;
     const at = (n: number, size: number) => Math.round((Math.min(1000, Math.max(0, n)) / 1000) * size);
     const x1 = at(Math.min(xmin, xmax) - margin, width);
     const y1 = at(Math.min(ymin, ymax) - margin, height);
     const x2 = at(Math.max(xmin, xmax) + margin, width);
     const y2 = at(Math.max(ymin, ymax) + margin, height);
     if (x2 <= x1 || y2 <= y1) throw new Error(`The box ${JSON.stringify(box)} is empty`);
-    const cropped = photon.crop(source, x1, y1, x2, y2);
+    const cropped = upright(photon.crop(source, x1, y1, x2, y2), turn);
     try {
       const data = Buffer.from(cropped.get_bytes()).toString('base64');
-      return { image: { type: 'image', data, mimeType: 'image/png' }, width: x2 - x1, height: y2 - y1 };
+      return { image: { type: 'image', data, mimeType: 'image/png' }, width: cropped.get_width(), height: cropped.get_height() };
     } finally {
       cropped.free();
     }
   } finally {
     source.free();
   }
+}
+
+/** `image` turned upright, as `turn` says: itself, or an image in its place when its sides swap. */
+function upright(image: photon.PhotonImage, turn: Orientation): photon.PhotonImage {
+  let turned = image;
+  if (turn.transpose) {
+    const width = image.get_width();
+    const height = image.get_height();
+    // A pixel at a time: get_raw_pixels() returns a copy, of 4 bytes for each.
+    const from = new Uint32Array(image.get_raw_pixels().buffer);
+    const to = new Uint32Array(from.length);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) to[x * height + y] = from[y * width + x]!;
+    }
+    image.free();
+    turned = new photon.PhotonImage(new Uint8Array(to.buffer), height, width);
+  }
+  if (turn.flipX) photon.fliph(turned);
+  if (turn.flipY) photon.flipv(turned);
+  return turned;
 }

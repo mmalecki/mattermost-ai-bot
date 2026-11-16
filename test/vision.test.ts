@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Api, AssistantMessage, Context, ImageContent, Model } from '@earendil-works/pi-ai';
-import type { ExtensionAPI, ToolDefinition } from '@earendil-works/pi-coding-agent';
+import { convertToPng, type ExtensionAPI, type ToolDefinition } from '@earendil-works/pi-coding-agent';
 import photon from '@silvia-odwyer/photon-node';
 import type { ImageFiles } from '../src/images.ts';
-import { crop, imageCrop, parseBoxes, vision } from '../src/vision.ts';
+import { type Box, crop, imageCrop, parseBoxes, vision } from '../src/vision.ts';
+import { orientedJpeg } from './fakes.ts';
 
 /** A `width` by `height` PNG, red in its top left quarter and white elsewhere. */
 function png(width: number, height: number): ImageContent {
@@ -16,6 +17,26 @@ function png(width: number, height: number): ImageContent {
   const data = Buffer.from(image.get_bytes()).toString('base64');
   image.free();
   return { type: 'image', data, mimeType: 'image/png' };
+}
+
+/** A `width` by `height` JPEG that gets redder to the right and greener down, so each part tells where it was. */
+function jpeg(width: number, height: number): Buffer {
+  const pixels = new Uint8Array(width * height * 4).fill(255);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) pixels.set([(x * 255) / width, (y * 255) / height, 0], (y * width + x) * 4);
+  }
+  const image = new photon.PhotonImage(pixels, width, height);
+  const data = Buffer.from(image.get_bytes_jpeg(90));
+  image.free();
+  return data;
+}
+
+/** The RGBA of every pixel of a PNG, row by row. */
+function pixels(image: ImageContent): Buffer {
+  const decoded = photon.PhotonImage.new_from_byteslice(Buffer.from(image.data, 'base64'));
+  const rgba = Buffer.from(decoded.get_raw_pixels());
+  decoded.free();
+  return rgba;
 }
 
 /** The RGBA of the pixel at `x`, `y` of a PNG. */
@@ -70,6 +91,32 @@ test('crops a box out of an image at its full size, with a margin', () => {
   // Kept within the image.
   assert.deepEqual([crop(image, [900, 900, 1200, 1200]).width, crop(image, [-50, 900, 100, 1000]).height], [20, 10]);
   assert.throws(() => crop(image, [500, 500, 500, 600]), /The box \[500,500,500,600\] is empty/);
+});
+
+test('crops a photo as its EXIF orientation turns it upright, which is how pi shows it to the models', async () => {
+  const stored = jpeg(200, 100);
+  const photo = (orientation: number): ImageContent => ({ type: 'image', data: orientedJpeg(stored, orientation).toString('base64'), mimeType: 'image/jpeg' });
+  const box: Box = [100, 200, 600, 900];
+  for (let orientation = 1; orientation <= 8; orientation++) {
+    // Upright, as pi turns it, where the box needs no turning.
+    const shown = await convertToPng(photo(orientation).data, 'image/jpeg');
+    assert.ok(shown, `orientation ${orientation}`);
+    for (const margin of [0, 50]) {
+      const expected = crop({ type: 'image', ...shown }, box, margin);
+      const cropped = crop(photo(orientation), box, margin);
+      assert.deepEqual([cropped.width, cropped.height], [expected.width, expected.height], `orientation ${orientation}`);
+      assert.ok(pixels(cropped.image).equals(pixels(expected.image)), `orientation ${orientation}`);
+    }
+  }
+
+  // Held on its side: a quarter turn clockwise stands it up, so its left edge, with no red, is the top.
+  const top = crop(photo(6), [0, 0, 100, 1000]);
+  const bottom = crop(photo(6), [900, 0, 1000, 1000]);
+  assert.deepEqual([top.width, top.height, bottom.width, bottom.height], [100, 20, 100, 20]);
+  assert.ok(pixel(top.image, 50, 10)[0]! < 40 && pixel(bottom.image, 50, 10)[0]! > 215);
+  // And its bottom edge, the greenest, is the left.
+  assert.ok(pixel(top.image, 5, 10)[1]! > 215 && pixel(top.image, 95, 10)[1]! < 40);
+  assert.deepEqual([crop(photo(1), [0, 0, 100, 1000]).width, crop(photo(1), [0, 0, 100, 1000]).height], [200, 10]);
 });
 
 const MODEL = { provider: 'openrouter', id: 'google/gemini-3.7-flash', input: ['text', 'image'] } as Model<Api>;

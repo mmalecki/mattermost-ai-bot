@@ -127,6 +127,8 @@ puts x first. Gemini's `box_2d` and Qwen's `bbox_2d` arrays are read too, from 0
 a lot at this: Qwen 3 VL and Gemma 4 find things well, while Claude Haiku 5.5 and Mistral Medium 3.5 only roughly,
 so try `locate` with the one you pick. The vision model is sent images scaled down to its limits, while `crop_image`
 cuts from the image as it was posted or returned, and shows the crop to the agent only when its model takes images.
+A photo taken with the camera on its side is stored that way, with its EXIF orientation saying how to turn it: the
+models see it upright, so boxes are of the upright photo, and crops come out upright too.
 These are tool calls, so only `allowedUsers` can have the agent make them.
 
 The vision model is asked for short, factual answers, of at most 2048 tokens: left alone, Qwen 3 VL writes thousands
