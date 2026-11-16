@@ -31,6 +31,10 @@ test('tells the model how images come only when it takes them', () => {
   assert.doesNotMatch(buildSystemPrompt(promptOptions), /\[image/);
 });
 
+test("tells the model how text files' contents come", () => {
+  assert.match(buildSystemPrompt(promptOptions), /between "\[file: name \(type\)\]" and "\[end of file: name\]"/);
+});
+
 test('tells the model about schedule only when the thread has it', () => {
   assert.match(buildSystemPrompt(withTools('schedule')), /call schedule/);
   assert.doesNotMatch(buildSystemPrompt(promptOptions), /schedule/);
