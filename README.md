@@ -3,37 +3,69 @@ An AI bot for Mattermost. Responds in threads and DMs, and runs in an agentic lo
 
 ![Mattermost thread with the bot executing "party lights" prompt](./docs/thread.png)
 
+Features:
+* MCP server support
+* image editing, creation, recognition, optionally with dedicated models
+* URL fetching and web searching (through Parallel)
+
 A less full-featured alternative to [Mattermost Agents plugin](https://github.com/mattermost/mattermost-plugin-agents).
 
-## Configuration
-Set in `.env`:
+## Quick start
+This starts the bot with a minimal set of features - basically a conversational bot.
+To allow it to do more, read on to the [deployment section](#deployment).
 
-* `MATTERMOST_URL`, `MATTERMOST_TOKEN` - Mattermost server and [bot token](https://developers.mattermost.com/integrate/reference/bot-accounts/)
-* `MATTERMOST_PUBLIC_URL` - where people open Mattermost, for the links the agent gives, if not `MATTERMOST_URL`, such
-  as when the bot reaches the server at an internal address
+```bash
+cp .env.quick .env
+# Fill in the required variables, and then:
+```
+
+### npm
+```bash
+npx @mmalecki/mattermost-ai-bot
+```
+
+### Docker
+```bash
+docker run --name mattermost-ai-bot \
+  --env-file .env -v mattermost-ai-bot:/data \
+  ghcr.io/mmalecki/mattermost-ai-bot
+```
+
+## Deployment
+
+### Configuration
+```bash
+cp .env.full .env
+# Fill in the values as desired
+```
+
+The configuration values are as follows:
+
+* `MATTERMOST_URL` - Mattermost server URL
+* `MATTERMOST_TOKEN` - [Mattermost bot token](https://developers.mattermost.com/integrate/reference/bot-accounts/)
+* `MATTERMOST_PUBLIC_URL` (defaults to `MATTERMOST_URL`) - where people open Mattermost, for the links the agent gives, useful when the bot reaches the server at an internal address
 * `MODEL` - the model, as `provider/model[:thinking]` like Pi's `--model`, for example
   `mistral/mistral-small-2603` or `anthropic/claude-haiku-5-5:low`. 
   [Pi handles provider and model quirks](https://pi.dev/docs/latest/providers).
   Thinking is off by default unless suffix is set.
   A thread runs on the model it started with, so a changed `MODEL` reaches new threads only.
 * The provider's API key, under Pi's [name for it](https://pi.dev/docs/latest/providers#use-an-api-key-from-the-environment) (for example: `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `MISTRAL_API_KEY`, ...)
-* `MAX_OUTPUT_TOKENS` - default 8192, or the model's own limit if lower. It includes reasoning, and keeps a model
-  stuck repeating itself from running for long
+* `MAX_OUTPUT_TOKENS` (defaults to 8192, or the model's own limit if lower) - maximum output tokens, including reasoning.
+  Keeps a stuck model from repeating itself or running too long.
 * `PARALLEL_API_KEY` - enables `websearch` through [Parallel](https://parallel.ai)
-* `IMAGE_MODEL` - enables `generate_image`, with this model, as `provider/model` like `MODEL` but without thinking,
-  for example `openrouter/bytedance-seed/seedream-5-0-pro`. See below
-* `VISION_MODEL` - enables `locate`, and `look_at_image` and `crop_image` where the thread's model doesn't take
-  images, with this model, which must take images, as `provider/model[:thinking]` like `MODEL`, for example
-  `openrouter/qwen/qwen3-vl-235b-a22b-instruct`. See below
-* `MCP_CONFIG` - path to the tools configuration, below. Default `./mcp.json`, which may be missing
-* `DATA_DIR` - default `./data`. Each thread has a directory in `sessions/`, named after its root post, with its
-  session in `session.jsonl` and its images in `images/`
-* `SCHEDULER` - `true` lets the agent schedule jobs in a thread, once or repeatedly. Default `false`. See below
-* `CODEMODE` - `true` gives the agent [Pi's `codemode`](https://pi.dev/docs/latest/codemode) tool even when every MCP
-  server has `direct` exposure. Default `false`. See below
+* `IMAGE_MODEL` - [image generation](#generating-images)-capable model, passed as `provider/model` (like `MODEL` but without thinking;
+  for example `openrouter/bytedance-seed/seedream-5-0-pro`)
+* `VISION_MODEL` - vision-capable model for [image recognition](#recognizing-images), passed as `provider/model[:thinking]`
+  (like `MODEL`; for example `openrouter/qwen/qwen3-vl-235b-a22b-instruct`)
+* `MCP_CONFIG` (defaults to `./mcp.json`, okay if missing) - path to the [tools configuration](#tools)
+* `DATA_DIR` (defaults to `./data`) - data directory for session and image storage
+* `SCHEDULER` (defaults to `false`) - `true` lets the agent [schedule jobs](#scheduled-jobs)
+* `CODEMODE` (defaults to `false`) - `true` gives the agent [Pi's `codemode`](https://pi.dev/docs/latest/codemode)
+  tool even when every MCP server has `direct` exposure
 * `ALLOW_PICKING_MODEL` - `true` lets the post that starts a thread pick its model. Default `false`. See below
 * `TZ` - time zone the posts' times are given to the model in, with their UTC offset. Default: the system's
 
+#### Custom providers
 Endpoints Pi doesn't know, such as a local llama.cpp server, go in `models.json` next to `mcp.json`, in
 [Pi's format](https://pi.dev/docs/latest/models-configuration):
 
@@ -52,29 +84,15 @@ Endpoints Pi doesn't know, such as a local llama.cpp server, go in `models.json`
 
 with `MODEL=local/qwen3.6-35b`.
 
-### Picking a model
-With `ALLOW_PICKING_MODEL=true`, the post that brings the bot into a thread can end with a model, written like `MODEL`
-after a `/`, for the thread to run on instead:
-
-```
-@sailor draw me a lighthouse /openrouter/google/gemini-3.1-pro:high
-```
-
-The word is taken off the post, and the thread keeps the model for good: the same word on a later post is just text,
-as is one naming a provider Pi doesn't know, such as `/etc/hosts`. A model Pi doesn't have, or has no API key for, is
-refused, and the next post that brings the bot into the thread starts it afresh. Anyone who can reach the bot can pick
-any model with a key, so turn it on only where everyone may spend on them. If a thread's model is gone later, it
-runs on `MODEL`.
-
-### System prompt additions
-`APPEND_SYSTEM.md`, next to `mcp.json`, is added to the system prompt, as in Pi. Use it to read the agent in on its
+#### System prompt additions
+`APPEND_SYSTEM.md`, next to `mcp.json`, is added to the system prompt, as in Pi. Use it to set the bot's
 identity, purpose, for example "You are Sailor, you look after our home through Home Assistant".
 Refreshed live for new sessions, and after a session idles out for existing ones.
 
-The agent also gets the thread's permalink, and each post's id, so it can link the thread or a post in it, for
+The agent also gets the thread's permalink, and each post's ID, so it can link the thread or a post in it, for
 example in a note it saves somewhere with a tool. Links take the `MATTERMOST_PUBLIC_URL/_redirect/pl/<post id>` form.
 
-### Images and files
+#### Images and files
 When the model takes images, as Pi's catalog or `models.json` says (`"input": ["text", "image"]`), the agent sees the
 images attached to posts, scaled down to the model's limits. Up to 8 go with each batch of posts, and images over
 20 MB, or in formats other than PNG, JPEG, GIF and WebP, go as Mattermost's preview of them.
@@ -91,7 +109,7 @@ When the model or some tool takes images, such as `generate_image` below, posts'
 as `image-2.png` for a second `image.png`. The agent is given the names, seeing the images or not, and passes them to
 the tools. Nothing removes them, or the thread's session, so `sessions/` grows with every thread.
 
-### Generating images
+#### Generating images
 With `IMAGE_MODEL` set, the agent gets a `generate_image` tool, and every image it generates in a run is attached to
 its reply, up to 10 to a post, and kept in the thread's `images/` as `image.png`, `image-2.png` and so on. It sees them
 too when the model takes images, scaled down to the model's limits and kept in the session file like posted images.
@@ -109,7 +127,7 @@ Pi generates images only through OpenRouter so far: `IMAGE_MODEL` is one of
 `MODEL` is. OpenRouter refuses models its account's [data policy](https://openrouter.ai/settings/privacy), such as zero
 data retention, rules out.
 
-### Recognizing images
+#### Recognizing images
 With `VISION_MODEL` set, the agent gets tools to work with the thread's images by name:
 
 * `look_at_image` asks the vision model about images, such as what one shows, or the text in it. Only when the
@@ -136,7 +154,7 @@ of words, and can repeat itself until it runs out of tokens, which takes it over
 small text, and agree with what a question suggests, so the agent is told to ask open questions, and to check the
 text read on a crop.
 
-### Tools
+#### Tools
 `mcp.json` uses [Pi's MCP configuration format](https://pi.dev/docs/latest/mcp), with one addition: `allowedUsers`, the
 Mattermost users who may have the agent call tools. It covers every tool call, the built-in web tools included, and
 a thread has tools only while everyone who has posted in it is one of them: a single post from anyone else, even one
@@ -195,7 +213,7 @@ included, to run calls in parallel or cut down large results. The `description` 
 shown to the model, whatever its exposure, though a `direct` server's only while the thread may use some of its tools.
 `mcp.example.json` is a starting point.
 
-#### Images for MCP servers
+###### Images for MCP servers
 A server's tools can take the thread's images, which the agent gives them by name, as it does `generate_image`, with
 another addition: the server's `images`, naming the arguments its tools take images in, and how each takes them:
 
@@ -222,7 +240,7 @@ name. A name in any other argument stays a name, so a tool that takes a path, a 
 their own doesn't get the image where it expects something else, and echo it back in an error. Images are passed on
 whole, up to 20 MB for a posted one, which `base64` and `dataUrl` grow by a third, so a server may refuse large ones.
 
-### Scheduled jobs
+#### Scheduled jobs
 With `SCHEDULER=true`, the agent gets a `schedule` tool: "remind me at 6 to close the garage", "every morning, check
 the weather". A job belongs to its thread. When it comes due, its prompt reaches the agent like a post, and the reply is
 posted to the thread. Scheduling is a tool call, so only `allowedUsers` can set up jobs, and a job gets tools only while
@@ -233,9 +251,23 @@ don't survive a restart well: a thread's jobs resume only once it gets a new pos
 meantime is dropped, and a recurring one skips the times it missed, keeping to its times after. Intervals run up to 24 days, from 5 seconds for a one-off job and a
 minute for a recurring one, and a thread can have 10 jobs.
 
-## Running
+#### Picking a model
+With `ALLOW_PICKING_MODEL=true`, the post that brings the bot into a thread can end with a model, written like `MODEL`
+after a `/`, for the thread to run on instead:
 
-### npm
+```
+@sailor draw me a lighthouse /openrouter/google/gemini-3.1-pro:high
+```
+
+This sets the model for the whole thread. If used later in it, or if referring to an unrecognized provider (for example `/etc/hosts`),
+it'll be passed down as text to model. A model Pi doesn't have, or has no API key for, is refused, and can be retried in same thread.
+
+Anyone who can reach the bot can pick any model with a key, so turn it on only where everyone may spend on them.
+If a thread's model is gone later, it runs on `MODEL`.
+
+### Running
+
+#### npm
 
 ```sh
 npm install -g @mmalecki/mattermost-ai-bot
@@ -248,7 +280,7 @@ npx @mmalecki/mattermost-ai-bot
 Run it in the directory with `.env`, `mcp.json`, `models.json` and `APPEND_SYSTEM.md`. Variables already set in the
 environment win over `.env`.
 
-### Docker
+#### Docker
 ```sh
 docker run -d --name mattermost-ai-bot \
   --restart=unless-stopped \
@@ -269,7 +301,7 @@ docker run -d --name mattermost-ai-bot --env-file .env -v "$PWD/config:/config:r
 rootless Docker or Podman, where the container's uids map to subordinate ones: hand it over with
 `docker run --rm --user root -v "$PWD/data:/data" ghcr.io/mmalecki/mattermost-ai-bot chown 1000:1000 /data`.
 
-### From source
+#### From source
 ```sh
 git clone https://github.com/mmalecki/mattermost-ai-bot.git
 cd mattermost-ai-bot
