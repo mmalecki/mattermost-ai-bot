@@ -179,7 +179,8 @@ export function loadTools(path: string, required: boolean): ToolsConfig {
 /**
  * `allowedUsers` from `mcp.json`: `["alice", "bob"]`, who may use every tool, or
  * `{ "alice": "*", "mail": ["mcp__parcels__*"] }`, with each user's tools as a name or glob, or a
- * list of them, as micromatch takes them. Usernames may start with `@`.
+ * list of them, as micromatch takes them. A pattern starting with `!` takes tools away from those the
+ * user's other patterns give. Usernames may start with `@`.
  */
 export function parseAllowedUsers(value: unknown): AllowedUsers {
   const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === 'string');
@@ -203,11 +204,20 @@ export function parseAllowedUsers(value: unknown): AllowedUsers {
   return new Map([...tools].map(([user, patterns]) => [user, toolMatcher(patterns)]));
 }
 
-/** Whether a tool name matches one of `patterns`, globs as micromatch takes them. None matches nothing. */
+/**
+ * Whether a tool name matches one of `patterns`, globs as micromatch takes them, and none of those
+ * negated with a leading `!`, which only take tools away: on its own, a negated pattern matches every
+ * other name, so it would give them all. None matches nothing, as do only negated ones.
+ */
 function toolMatcher(patterns: string[]): (toolName: string) => boolean {
+  const globs = patterns.map((p) => p.trim()).filter(Boolean);
+  const negated = (glob: string) => micromatch.scan(glob).negated;
   // `dot`, so that `*` matches every name.
-  const matchers = patterns.map((p) => p.trim()).filter(Boolean).map((p) => micromatch.matcher(p, { dot: true }));
-  return (toolName) => matchers.some((matches) => matches(toolName));
+  const matcher = (glob: string) => micromatch.matcher(glob, { dot: true });
+  const given = globs.filter((glob) => !negated(glob)).map(matcher);
+  // As written, these match the names they leave.
+  const left = globs.filter(negated).map(matcher);
+  return (toolName) => given.some((matches) => matches(toolName)) && left.every((matches) => matches(toolName));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

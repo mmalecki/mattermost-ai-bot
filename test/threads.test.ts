@@ -291,6 +291,20 @@ test("an image that can't be downloaded is only named, and the posts still answe
   await threads.close();
 });
 
+test("an image that can't be saved is only named, and said to be that", async () => {
+  const { chat, sessions, threads } = setup();
+  // Too long for a file's name.
+  const long = `${'x'.repeat(300)}.png`;
+  chat.files.set('f1', new Uint8Array([1])).set('f2', new Uint8Array([2]));
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'hm', [image('f1', long), image('f2', 'here.png')]), { id: 'r1', direct: true }));
+  await threads.idle();
+  const session = sessions.get('r1')!;
+  assert.ok(session.prompts[0]!.endsWith(`[image: ${long}, not shown: it couldn't be saved]\n[image 1: here.png]`));
+  assert.equal(session.images[0]!.length, 1);
+  assert.deepEqual(chat.replies.map((r) => r.message), ['ok']);
+  await threads.close();
+});
+
 test('images past the limit for one batch of posts are only named', async () => {
   const { chat, sessions, threads } = setup();
   const files = Array.from({ length: 10 }, (_, i) => image(`f${i}`, `${i}.png`));

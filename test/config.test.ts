@@ -102,6 +102,26 @@ test('allowedUsers can give each user their tools, by name or glob', () => {
   assert.deepEqual(may('guest'), []);
 });
 
+test('a negated pattern in allowedUsers only takes tools away', () => {
+  const users = parseAllowedUsers({
+    bob: ['mcp__home__*', '!mcp__home__HassLockUnlock', ' !mcp__home__HassTurn* '],
+    carol: ['*', '!schedule'],
+    dave: '!schedule',
+    erin: ['!schedule', 'websearch', 'schedule'],
+    // Not negated: an extglob, for every name but these.
+    frank: '!(schedule|codemode)',
+  });
+  const TOOLS = ['websearch', 'codemode', 'schedule', 'mcp__home__GetLiveContext', 'mcp__home__HassLockUnlock', 'mcp__home__HassTurnOn'];
+  const may = (user: string) => TOOLS.filter((t) => users.get(user)!(t));
+  assert.deepEqual(may('bob'), ['mcp__home__GetLiveContext']);
+  assert.deepEqual(may('carol'), TOOLS.filter((t) => t !== 'schedule'));
+  // Nothing to take away from, rather than every other tool.
+  assert.deepEqual(may('dave'), []);
+  // Wherever it is in the list.
+  assert.deepEqual(may('erin'), ['websearch']);
+  assert.deepEqual(may('frank'), TOOLS.filter((t) => t !== 'schedule' && t !== 'codemode'));
+});
+
 test('reads how enabled servers take images', () => {
   const servers = {
     barcodes: { command: 'barcoding-mcp', images: { base64: 'base64' } },
