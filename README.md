@@ -16,7 +16,7 @@ To allow it to do more, read on to the [deployment section](#deployment).
 
 ```bash
 # Fetch the quick start .env
-curl https://raw.githubusercontent.com/mmalecki/mattermost-ai-bot/refs/heads/latest/.env.quick --output .env
+curl -fSL https://raw.githubusercontent.com/mmalecki/mattermost-ai-bot/refs/heads/latest/.env.quick --output .env
 # Fill in the required variables in .env, and then either run with npm or Docker:
 ```
 
@@ -36,8 +36,9 @@ docker run --name mattermost-ai-bot \
 
 ### Configuration
 ```bash
-cp .env.full .env
-# Fill in the values as desired
+# Fetch the full configuration .env
+curl -fSL --output .env.full https://raw.githubusercontent.com/mmalecki/mattermost-ai-bot/refs/heads/latest/.env.full
+# Add optional options from .env.full to your existing .env
 ```
 
 The configuration values are as follows:
@@ -114,7 +115,7 @@ the tools. Nothing removes them, or the thread's session, so `sessions/` grows w
 With `IMAGE_MODEL` set, the agent gets a `generate_image` tool. Images
 it generates are included in its reply as attachments.
 
-If the model accepts images, the generated images are presented to it (scaled as needed) as results of the tool call.
+If the thread's model accepts images, the generated images are presented to it (scaled as needed) as results of the tool call.
 
 When the image model accepts images as well, agent can have images edited.
 
@@ -256,7 +257,7 @@ after a `/`, for the thread to run on instead:
 @sailor draw me a lighthouse /openrouter/google/gemini-3.1-pro:high
 ```
 
-This sets the model for the whole thread. Later model suffixes and unrecognized provider (for example `/etc/hosts`) are treated as ordinary text. If the model is unavailable or is missing an API key, the bot rejects the selection. Retry a different is possible in the same thread.
+This sets the model for the whole thread. Later model suffixes and unrecognized providers (for example `/etc/hosts`) are treated as ordinary text. If the model is unavailable or is missing an API key, the bot rejects the selection. You can retry with a different in the same thread.
 
 Anyone who can reach the bot can pick any model with a key, so turn it on only where everyone may spend on them.
 If a thread's model is gone later, it runs on `MODEL`.
