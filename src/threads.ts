@@ -241,6 +241,7 @@ class Thread {
    * a single post from anyone with fewer tools takes the others away. `userIds` are this run's new
    * posts' authors; the session's recorded ones count too, deleted posts' included, as the agent has
    * seen what they wrote. An author who can no longer be looked up, or isn't in the allowlist, has none.
+   * Nor does a run with no authors at all, which no one has asked for.
    */
   async #allowTools(seen: Seen, userIds: Iterable<string>): Promise<void> {
     const { chat, options } = this.#context;
@@ -252,7 +253,9 @@ class Thread {
     const ids = new Set([...seen.userIds, ...userIds]);
     const names = await Promise.all([...ids].map((id) => chat.username(id).catch(() => undefined)));
     const patterns = names.map((name) => (name === undefined ? undefined : allowedUsers.get(name)));
-    this.#allowed = patterns.every((may) => may !== undefined) ? (toolName) => patterns.every((may) => may(toolName)) : () => false;
+    // `every` holds for no authors, which would give every tool.
+    const known = patterns.length > 0 && patterns.every((may) => may !== undefined);
+    this.#allowed = known ? (toolName) => patterns.every((may) => may!(toolName)) : () => false;
   }
 
   async #answer(session: ThreadSession, prompt: string, images: ImageContent[] = []): Promise<void> {
