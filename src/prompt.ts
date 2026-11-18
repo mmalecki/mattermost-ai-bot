@@ -21,10 +21,12 @@ export interface SystemPromptOptions {
   serverUrl: string;
   /** The thread's root post, so its link can be given. */
   rootId: string;
+  /** Whether jobs people set up in schedules.json come as posts of theirs. */
+  schedules?: boolean;
 }
 
 export function buildSystemPrompt(options: SystemPromptOptions): string {
-  const { botUsername, servers, tools, images, imageEdits, imageServers, serverUrl, rootId } = options;
+  const { botUsername, servers, tools, images, imageEdits, imageServers, serverUrl, rootId, schedules = false } = options;
   const has = (tool: string) => tools.has(tool);
   const imageArguments = Object.entries(imageServers)
     .filter(([name]) => hasServerTools(tools, name))
@@ -32,6 +34,11 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
   return [
     `You are @${botUsername}, a Mattermost bot that gets things done with your tools.`,
     'Each user message holds one or more Mattermost posts from a thread, as "@username (time, post <id>): text". Several people can take part in one thread.',
+    ...(schedules
+      ? [
+          'A post marked scheduled "<name>" in place of its id comes from a schedule its author set up, at the time it gives, and repeats on its own: do what it says now, and never schedule it again.',
+        ]
+      : []),
     `The files attached to a post are listed after its text. A text file's contents come between "[file: name (type)]" and "[end of file: name]", which says so when they are cut off.${images ? ' Images you can see are "[image <n>: name]", and come at the end of the message, in that order.' : ''}`,
     `This thread's link is ${permalink(serverUrl, rootId)}, and a post's is ${permalink(serverUrl, '<id>')}: use them to point to the thread or a post in it.`,
     'Your reply is posted to the thread as Mattermost markdown.',

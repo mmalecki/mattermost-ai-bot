@@ -7,6 +7,7 @@ Features:
 * MCP server support
 * image editing, creation, recognition, optionally with dedicated models
 * URL fetching and web searching (through Parallel)
+* jobs on a schedule, set up by the agent when asked, or in a file, such as a morning brief
 
 A less full-featured alternative to [Mattermost Agents plugin](https://github.com/mattermost/mattermost-plugin-agents).
 
@@ -249,6 +250,64 @@ don't survive a restart well: a thread's jobs resume only once it gets a new pos
 meantime is dropped, and a recurring one skips the times it missed, keeping to its times after. Intervals run up to 24 days, from 5 seconds for a one-off job and a
 minute for a recurring one, and a thread can have 10 jobs.
 
+For jobs that people set up, rather than the agent, see [user-scheduled jobs](#user-scheduled-jobs).
+
+#### User-scheduled jobs
+Jobs set up in `schedules.json`, next to `mcp.json`, run at the times they give, such as a morning brief. They need no
+`SCHEDULER`, and the file keeps them, so they run from the bot's start, restarts included.
+
+```json
+{
+  "morning-brief": {
+    "cron": "0 7 * * 1-5",
+    "timezone": "Europe/Warsaw",
+    "to": "@alice",
+    "title": "Morning brief",
+    "promptFile": "morning-brief.md",
+    "catchUp": "30m"
+  },
+  "house-digest": {
+    "cron": "0 21 * * *",
+    "to": "home/town-square",
+    "owner": "bob",
+    "prompt": "Sum up what happened in Home Assistant today.",
+    "model": "mistral/mistral-small-2603"
+  }
+}
+```
+
+Each job, under a name of letters, digits, `.`, `_` and `-`, takes:
+
+* `cron` - when it runs: five fields, minute, hour, day of month, month and day of week, as in crontab (`0 7 * * 1-5`
+  is 7:00 on weekdays), or a nickname such as `@daily`
+* `timezone` (defaults to `TZ`) - the time zone of `cron`'s times, such as `Europe/Warsaw`, which they keep to across
+  daylight saving changes
+* `to` - where each run starts a thread: `@user`, in the bot's direct channel with them, or `team/channel`, by the
+  names in their URLs, in a channel the bot is in
+* `thread` - instead of `to`, the ID of a post, for every run to go to its thread
+* `owner` (defaults to the `to` user) - the user the job runs as
+* `title` (defaults to the name) - what the post that starts each thread says
+* `prompt` - what to ask the agent, or `promptFile`, a file next to `schedules.json` with it
+* `model` (defaults to `MODEL`) - the model a new thread runs on, written like `MODEL`
+* `catchUp` - how late a run may still go, such as `30m` or `2h`. See below
+* `enabled` - `false` turns the job off
+
+Each run starts a thread with a post from the bot, such as "**Morning brief** for @alice", which mentions the owner, so
+they follow the thread and hear of the answer in it. The job's prompt reaches the agent as a post from the owner, and
+the thread carries on like any other: replies in it reach the agent, which knows what it said. A job with `thread`
+runs in that thread each time, where the agent knows what it said before, such as yesterday's brief. A new thread each
+time adds a session to `sessions/`, which nothing removes.
+
+A run gets the owner's tools under `allowedUsers`, and as in any thread, fewer once someone else posts in it. An owner
+not in `allowedUsers` gets none, which the bot warns of on start. Whoever can edit `schedules.json` can have the agent
+act as anyone, so keep it with `mcp.json`.
+
+`schedules.json` is read on start: a job that's malformed, or whose model can't run, stops the bot from starting. A
+`promptFile` is read at every run, so it can change between runs. A run the bot was down for, or is over a minute late
+for, is skipped, unless `catchUp` lets it be that late: then the latest one missed runs, once. When each job last came
+due, or was added, is kept in `DATA_DIR/schedules-state.json`. A run that comes due while the job's last one is still
+going is skipped.
+
 #### Picking a model
 With `ALLOW_PICKING_MODEL=true`, the post that brings the bot into a thread can end with `/model` and a model, written
 like `MODEL`, for the thread to run on instead:
@@ -278,7 +337,7 @@ mattermost-ai-bot
 npx @mmalecki/mattermost-ai-bot
 ```
 
-Run it in the directory with `.env`, `mcp.json`, `models.json` and `APPEND_SYSTEM.md`. Variables already set in the
+Run it in the directory with `.env`, `mcp.json`, `models.json`, `APPEND_SYSTEM.md` and `schedules.json`. Variables already set in the
 environment win over `.env`.
 
 #### Docker
@@ -289,7 +348,7 @@ docker run -d --name mattermost-ai-bot \
   ghcr.io/mmalecki/mattermost-ai-bot
 ```
 
-The image runs the bot as uid 1000, not root. `mcp.json`, `models.json` and `APPEND_SYSTEM.md` go in a directory
+The image runs the bot as uid 1000, not root. `mcp.json`, `models.json`, `APPEND_SYSTEM.md` and `schedules.json` go in a directory
 mounted at `/config`, and `DATA_DIR` is `/data`. Leave `DATA_DIR` and `MCP_CONFIG` out of the `.env` the container
 gets, as paths for running outside it would replace these:
 

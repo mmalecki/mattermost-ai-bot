@@ -35,6 +35,11 @@ test("tells the model how text files' contents come", () => {
   assert.match(buildSystemPrompt(promptOptions), /between "\[file: name \(type\)\]" and "\[end of file: name\]"/);
 });
 
+test('tells the model how scheduled posts come only when there are schedules', () => {
+  assert.doesNotMatch(buildSystemPrompt(promptOptions), /scheduled "<name>"/);
+  assert.match(buildSystemPrompt({ ...promptOptions, schedules: true }), /A post marked scheduled "<name>" in place of its id .* never schedule it again\./);
+});
+
 test('tells the model about schedule only when the thread has it', () => {
   assert.match(buildSystemPrompt(withTools('schedule')), /call schedule/);
   assert.doesNotMatch(buildSystemPrompt(promptOptions), /schedule/);

@@ -161,6 +161,7 @@ export async function createAgent(config: Config, botUsername: string): Promise<
         imageServers: Object.fromEntries(Object.entries(serverImages).map(([name, args]) => [name, Object.keys(args)])),
         serverUrl: config.mattermost.publicUrl,
         rootId,
+        schedules: config.schedules.length > 0,
       };
       const prompt = (tools: ReadonlySet<string>) => buildSystemPrompt({ ...promptOptions, tools });
       const resourceLoader = new DefaultResourceLoader({

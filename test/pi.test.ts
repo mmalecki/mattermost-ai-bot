@@ -323,3 +323,21 @@ test('the posts marked seen are kept in the session file, as earlier versions ke
   const entries = sessionFile(dir, 'r1').getEntries().filter((e) => e.type === 'custom' && e.customType === 'mattermost');
   assert.deepEqual(entries.map((e) => (e as { data: unknown }).data), [{ createAt: 1_000, userIds: ['u1', 'u2'] }, { createAt: 2_000, userIds: ['u3'] }]);
 });
+
+test("an author recorded before a thread's first post counts at once, and leaves which posts were seen as it was", async (t) => {
+  const llm = await fakeLlm();
+  t.after(llm.close);
+  const { agent } = await localAgent({ baseUrl: llm.url });
+  // As a user-scheduled job's run records its owner.
+  const first = await open(agent, 'r1');
+  first.markSeen(0, ['u1']);
+  assert.deepEqual(first.seen(), { createAt: 0, userIds: new Set(['u1']) });
+  await first.prompt('hi');
+  first.markSeen(3_000, ['u2']);
+  first.markSeen(0, ['u1']);
+  await first.close();
+
+  const reopened = await open(agent, 'r1');
+  assert.deepEqual(reopened.seen(), { createAt: 3_000, userIds: new Set(['u1', 'u2']) });
+  await reopened.close();
+});

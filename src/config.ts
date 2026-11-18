@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { CreateAgentSessionOptions, McpServerConfig } from '@earendil-works/pi-coding-agent';
+import { Cron } from 'croner';
 import micromatch from 'micromatch';
 import { errorMessage } from './error.ts';
 
@@ -24,6 +25,8 @@ export interface Config {
   tools: ToolsConfig;
   /** Whether the agent can schedule jobs in its threads. */
   scheduler: boolean;
+  /** Jobs people set up in schedules.json, next to the MCP config, which the bot runs on its own. */
+  schedules: Schedule[];
   /** Whether the agent always has `codemode`, not only with servers of `codemode` exposure. */
   codemode: boolean;
   /** Whether a thread's first post may pick the model the thread runs on, instead of `llm`'s. */
@@ -47,6 +50,33 @@ export interface ToolsConfig {
    */
   serverImages: Record<string, ImageArguments>;
 }
+
+/** A job set up in schedules.json, which the bot runs on its own, at the times its cron expression gives. */
+export interface Schedule {
+  /** Its key in schedules.json. */
+  name: string;
+  /** Five fields, or a nickname such as `@daily`, as croner reads them. */
+  cron: string;
+  /** The IANA time zone `cron` is read in. Unset: the bot's own, as TZ sets it. */
+  timezone: string | undefined;
+  /**
+   * Where its runs go: a new thread each, in the direct channel with a user or in a team's channel,
+   * both by their names, or one thread, by a post in it.
+   */
+  target: { user: string } | { team: string; channel: string } | { thread: string };
+  /** The username it runs as, whose tools it gets. */
+  owner: string;
+  /** What a new thread's root post says, with a mention of the owner. */
+  title: string;
+  /** What the agent is asked: given, or read from a file at every run. */
+  prompt: { text: string } | { file: string };
+  /** The model a new thread runs on, written like MODEL. Unset: MODEL. */
+  model: string | undefined;
+  /** How late a run may still go, as when the bot was down at its time, in ms. 0: only on time. */
+  catchUpMs: number;
+}
+
+const SCHEDULE_KEYS = new Set(['cron', 'timezone', 'to', 'thread', 'owner', 'title', 'prompt', 'promptFile', 'model', 'catchUp', 'enabled']);
 
 /** Usernames, and for each, whether they may have the agent call a tool, by its name. */
 export type AllowedUsers = Map<string, (toolName: string) => boolean>;
@@ -100,6 +130,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // A missing default file means no MCP servers; a missing file that was asked for is an error.
     tools: loadTools(mcpConfig, !!env.MCP_CONFIG),
     scheduler: flag('SCHEDULER'),
+    schedules: loadSchedules(join(dirname(mcpConfig), 'schedules.json')),
     codemode: flag('CODEMODE'),
     pickModel: flag('ALLOW_PICKING_MODEL'),
     // pi's name for instructions added to its system prompt, kept next to the tools they're about.
@@ -174,6 +205,106 @@ export function loadTools(path: string, required: boolean): ToolsConfig {
     if (server.enabled !== false) serverImages[name] = images as ImageArguments;
   }
   return { allowedUsers, mcpServers, serverImages };
+}
+
+/**
+ * Reads schedules.json, if there is one: an object with a job under each name, each with a `cron`
+ * expression, and its `timezone`; where it posts, `to` a `@user` or a `team/channel`, or in a
+ * `thread`, by a post in it; its `owner`, the `to` user by default; a `title`, the name by default;
+ * a `prompt`, or a `promptFile` next to schedules.json; a `model`; how late it may `catchUp`, such
+ * as `30m`; and whether it's `enabled`.
+ */
+export function loadSchedules(path: string): Schedule[] {
+  if (!existsSync(path)) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (error) {
+    throw new Error(`${path}: ${errorMessage(error)}`);
+  }
+  if (!isRecord(parsed)) throw new Error(`${path}: expected an object with a job under each name`);
+  const schedules: Schedule[] = [];
+  for (const [name, job] of Object.entries(parsed)) {
+    try {
+      if (!/^[\w.-]+$/.test(name)) throw new Error('a name is letters, digits, ".", "_" and "-"');
+      if (!isRecord(job)) throw new Error('expected an object');
+      const schedule = parseSchedule(name, job, dirname(path));
+      if (schedule) schedules.push(schedule);
+    } catch (error) {
+      throw new Error(`${path}: "${name}": ${errorMessage(error)}`);
+    }
+  }
+  return schedules;
+}
+
+/** The job `name`, or nothing when it isn't `enabled`. A `promptFile` is relative to `dir`. */
+function parseSchedule(name: string, job: Record<string, unknown>, dir: string): Schedule | undefined {
+  const unknown = Object.keys(job).filter((key) => !SCHEDULE_KEYS.has(key));
+  if (unknown.length) throw new Error(`unknown ${unknown.map((key) => `"${key}"`).join(', ')}; a job takes ${[...SCHEDULE_KEYS].join(', ')}`);
+  const string = (key: string): string | undefined => {
+    const value = job[key];
+    if (value === undefined) return undefined;
+    if (typeof value !== 'string' || !value.trim()) throw new Error(`"${key}" must be a non-empty string`);
+    return value.trim();
+  };
+  if (job.enabled !== undefined && typeof job.enabled !== 'boolean') throw new Error('"enabled" must be true or false');
+  if (job.enabled === false) return undefined;
+
+  const cron = string('cron');
+  if (!cron) throw new Error('"cron" must give its times, such as "0 7 * * 1-5"');
+  const timezone = string('timezone');
+  if (timezone) {
+    try {
+      new Intl.DateTimeFormat('en', { timeZone: timezone });
+    } catch {
+      throw new Error(`"timezone" must be an IANA time zone, such as "Europe/Warsaw", not "${timezone}"`);
+    }
+  }
+  let next: Date | null;
+  try {
+    next = new Cron(cron, { mode: '5-part', timezone }).nextRun();
+  } catch (error) {
+    throw new Error(`"cron" must be five fields, or a nickname such as "@daily": ${errorMessage(error)}`);
+  }
+  if (!next) throw new Error(`"cron" "${cron}" never comes due`);
+
+  const to = string('to');
+  const thread = string('thread');
+  if (!to === !thread) throw new Error('give either "to", a "@user" or a "team/channel" to start a thread in each run, or "thread", the id of a post in the thread to run in');
+  let target: Schedule['target'];
+  if (to?.startsWith('@')) target = { user: to.slice(1) };
+  else if (to) {
+    const [team, channel, ...rest] = to.split('/');
+    if (!team || !channel || rest.length) throw new Error(`"to" must be a "@user" or a "team/channel", by the names in their URLs, not "${to}"`);
+    target = { team, channel };
+  } else target = { thread: thread! };
+  const owner = string('owner')?.replace(/^@/, '') ?? ('user' in target ? target.user : undefined);
+  if (!owner) throw new Error('"owner" must name the user the job runs as, unless it goes "to" a "@user"');
+
+  const text = string('prompt');
+  const file = string('promptFile');
+  if (!text === !file) throw new Error('give either "prompt", what to ask the agent, or "promptFile", a file with it');
+  const promptPath = file && resolve(dir, file);
+  if (promptPath && !existsSync(promptPath)) throw new Error(`"promptFile" ${promptPath} does not exist`);
+
+  const model = string('model');
+  if (model) parseModel(model, { name: '"model"' });
+  const catchUp = string('catchUp');
+  const duration = catchUp === undefined ? undefined : /^(\d+)\s*(m|h)$/.exec(catchUp);
+  if (catchUp !== undefined && !duration) throw new Error(`"catchUp" must be minutes or hours, such as "30m" or "2h", not "${catchUp}"`);
+  const catchUpMs = duration ? Number(duration[1]) * (duration[2] === 'h' ? 3_600_000 : 60_000) : 0;
+
+  return {
+    name,
+    cron,
+    timezone,
+    target,
+    owner,
+    title: string('title') ?? name,
+    prompt: promptPath ? { file: promptPath } : { text: text! },
+    model,
+    catchUpMs,
+  };
 }
 
 /**

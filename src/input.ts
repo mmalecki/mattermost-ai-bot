@@ -40,6 +40,11 @@ export function formatJob(job: ScheduledJob, now: number): string {
   return `Scheduled job ${job.id} is due (${formatTime(now)}): ${job.prompt}`;
 }
 
+/** The prompt of a job people set up in schedules.json, `name`, as a post from its `owner`, made `now`. */
+export function formatScheduled(name: string, owner: string, prompt: string, now: number): string {
+  return `@${owner} (${formatTime(now)}, scheduled "${name}"): ${prompt}`;
+}
+
 /**
  * `message` without a trailing `/model provider/model[:thinking]` on its last line, and the ref. Only
  * a ref written so is one, so `what does /model do?` is no pick. Whether it names a model is the
