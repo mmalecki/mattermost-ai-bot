@@ -3,7 +3,7 @@ import type { Agent, RunOutcome, Seen, ThreadSession } from './agent.ts';
 import type { Chat, IncomingPost, ThreadPost } from './chat.ts';
 import type { AllowedUsers, ModelChoice } from './config.ts';
 import { errorMessage } from './error.ts';
-import { attachments, formatJob, formatPosts, trailingModel } from './input.ts';
+import { attachments, formatJob, formatPosts, formatScheduled, trailingModel } from './input.ts';
 import type { ScheduledJob } from './scheduler.ts';
 
 export interface ThreadsOptions {
@@ -25,10 +25,25 @@ interface ThreadContext {
 
 const TYPING_INTERVAL_MS = 3_000;
 
+/** A run of a job people set up in schedules.json: its prompt, given to the agent as a post from its owner. */
+export interface ScheduledRun {
+  /** The job's name. */
+  name: string;
+  /** The user it runs as, who counts as one of the thread's authors from then on. */
+  owner: { id: string; name: string };
+  prompt: string;
+  /** The model a new thread runs on, instead of MODEL. */
+  model?: ModelChoice;
+}
+
+/** What comes due in a thread: one of the agent's scheduled jobs, or a user-scheduled run, with its `done`. */
+type Due = { job: ScheduledJob } | { run: ScheduledRun; done: () => void };
+
 /**
- * One agent session per thread. Threads start with a DM or a mention of the bot, and from then on
- * every post in them reaches the agent, as do the thread's scheduled jobs when they come due. Runs are
- * serialized per thread: posts arriving during a run are handed over together once it ends.
+ * One agent session per thread. Threads start with a DM or a mention of the bot, or with a run of a
+ * user-scheduled job, and from then on every post in them reaches the agent, as do the thread's
+ * scheduled jobs when they come due. Runs are serialized per thread: posts arriving during a run are
+ * handed over together once it ends.
  */
 export class Threads {
   readonly #context: ThreadContext;
@@ -45,19 +60,42 @@ export class Threads {
     const { agent, options } = this.#context;
     if (this.#closed || post.userId === options.botUserId || post.type) return;
     const rootId = post.rootId || post.id;
+    if (!this.#threads.has(rootId) && !post.direct && !post.mentioned && !agent.hasSession(rootId)) return;
+    this.#thread(post.channelId, rootId, post.id).wake();
+  }
+
+  /**
+   * Runs `run` in the thread `rootId`, in `channelId`, once the thread is done with what it is running.
+   * A thread the bot has just started gets its session then, on `run.model`. Resolves once the run is
+   * over, or dropped as the bot shuts down.
+   */
+  runScheduled(channelId: string, rootId: string, run: ScheduledRun): Promise<void> {
+    if (this.#closed) {
+      console.warn(`Thread ${rootId}: shutting down, so scheduled "${run.name}" is dropped`);
+      return Promise.resolve();
+    }
+    return this.#thread(channelId, rootId, rootId).schedule(run);
+  }
+
+  /** The thread `rootId`, started now if it isn't running, by `firstPostId`. */
+  #thread(channelId: string, rootId: string, firstPostId: string): Thread {
     let thread = this.#threads.get(rootId);
     if (!thread) {
-      if (!post.direct && !post.mentioned && !agent.hasSession(rootId)) return;
-      const created = new Thread(this.#context, post.channelId, rootId, post.id, this.#closing.get(rootId), () => this.#retire(rootId, created));
+      const created = new Thread(this.#context, channelId, rootId, firstPostId, this.#closing.get(rootId), () => this.#retire(rootId, created));
       this.#threads.set(rootId, created);
       thread = created;
     }
-    thread.wake();
+    return thread;
   }
 
   /** Resolves once every running thread finishes. */
   async idle(): Promise<void> {
-    await Promise.all([...this.#threads.values()].map((t) => t.running));
+    // A run that ends may start another, for what came in as it ended.
+    for (let running = this.#running(); running.length; running = this.#running()) await Promise.all(running);
+  }
+
+  #running(): Promise<void>[] {
+    return [...this.#threads.values()].flatMap((t) => t.running ?? []);
   }
 
   /** Stops taking posts and jobs, lets running threads finish their current run, and closes every session. */
@@ -94,8 +132,8 @@ class Thread {
   running: Promise<void> | undefined;
   #session: ThreadSession | undefined;
   #pending = false;
-  /** Scheduled jobs that came due, run after any new posts. */
-  readonly #jobs: ScheduledJob[] = [];
+  /** Scheduled jobs and runs that came due, run after any new posts, in turn. */
+  readonly #due: Due[] = [];
   /**
    * Whether the current run may call a tool, by its name. The session's tool guard asks it through
    * #open's allowTools, and it is set anew before each run. That's safe only because a thread's runs
@@ -126,8 +164,20 @@ class Thread {
       console.warn(`Thread ${this.#rootId}: closing, so scheduled job ${job.id} is dropped`);
       return;
     }
-    this.#jobs.push(job);
+    this.#due.push({ job });
     this.#start();
+  }
+
+  /** Runs `run` once the thread is done with what it is running, and resolves once it is over or dropped. */
+  schedule(run: ScheduledRun): Promise<void> {
+    if (this.#closed) {
+      console.warn(`Thread ${this.#rootId}: closing, so scheduled "${run.name}" is dropped`);
+      return Promise.resolve();
+    }
+    return new Promise((done) => {
+      this.#due.push({ run, done });
+      this.#start();
+    });
   }
 
   /**
@@ -138,6 +188,13 @@ class Thread {
     this.#closed = true;
     clearTimeout(this.#idleTimer);
     await this.running;
+    // The agent's own jobs are in the session, which arms them again when it reopens.
+    for (const due of this.#due.splice(0)) {
+      if ('run' in due) {
+        console.warn(`Thread ${this.#rootId}: closing, so scheduled "${due.run.name}" is dropped`);
+        due.done();
+      }
+    }
     const session = this.#session;
     this.#session = undefined;
     await session?.close();
@@ -146,7 +203,10 @@ class Thread {
   #start(): void {
     this.running ??= this.#run().finally(() => {
       this.running = undefined;
-      if (!this.#closed) this.#scheduleIdle();
+      if (this.#closed) return;
+      // A run's `done` lets others act before this: what they bring in comes too late for the loop.
+      if (this.#pending || this.#due.length) this.#start();
+      else this.#scheduleIdle();
     });
   }
 
@@ -157,14 +217,18 @@ class Thread {
     const typing = setInterval(() => chat.typing(this.#channelId, this.#rootId), TYPING_INTERVAL_MS);
     try {
       await this.#previous;
-      while (!this.#closed && (this.#pending || this.#jobs.length)) {
-        const job = this.#pending ? undefined : this.#jobs.shift();
+      while (!this.#closed && (this.#pending || this.#due.length)) {
+        const due = this.#pending ? undefined : this.#due.shift();
         this.#pending = false;
         try {
-          await (job ? this.#runJob(await this.#open(), job) : this.#answerPosts());
+          if (!due) await this.#answerPosts();
+          else if ('job' in due) await this.#runJob(await this.#open(), due.job);
+          else await this.#runScheduled(due.run);
         } catch (error) {
           console.error(`Thread ${this.#rootId} failed:`, error);
           await chat.reply(this.#channelId, this.#rootId, `Sorry, something went wrong: ${errorMessage(error)}`).catch(() => {});
+        } finally {
+          if (due && 'run' in due) due.done();
         }
       }
     } finally {
@@ -234,6 +298,16 @@ class Thread {
     await this.#allowTools(session.seen(), []);
     console.log(`Thread ${this.#rootId}: scheduled job ${job.id} is due`);
     await this.#answer(session, formatJob(job, Date.now()));
+  }
+
+  async #runScheduled(run: ScheduledRun): Promise<void> {
+    const session = await this.#open(run.model);
+    // The owner is an author from now on, as one who posted would be. A createAt of 0 leaves which
+    // posts were seen as it was.
+    session.markSeen(0, [run.owner.id]);
+    await this.#allowTools(session.seen(), []);
+    console.log(`Thread ${this.#rootId}: scheduled "${run.name}" is due`);
+    await this.#answer(session, formatScheduled(run.name, run.owner.name, run.prompt, Date.now()));
   }
 
   /**

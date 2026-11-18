@@ -868,3 +868,83 @@ test("tools get nothing from outside the thread's images", async () => {
   assert.deepEqual(errors, ['secret.png', '../../r2/images/secret.png', 'notes.pdf', '.'].map((name) => `${name} ${notHere}`));
   await threads.close();
 });
+
+const BRIEF = { name: 'morning-brief', owner: { id: 'u1', name: 'maciej' }, prompt: 'What is on today?' };
+
+test('a scheduled run starts the thread it is given, as a post from its owner, with their tools and model', async () => {
+  const { chat, sessions, threads } = setup({ answer: () => 'Sunny, and the bins go out.' });
+  const model: ModelChoice = { provider: 'anthropic', model: 'claude-haiku-5-5', thinkingLevel: 'low' };
+  await threads.runScheduled('c1', 'r1', { ...BRIEF, model });
+
+  const session = sessions.get('r1')!;
+  assert.deepEqual(session.model, model);
+  assert.match(session.prompts[0]!, /^@maciej \(\d{4}-\d\d-\d\d \d\d:\d\d .+, scheduled "morning-brief"\): What is on today\?$/);
+  assert.deepEqual(session.tools, [TOOLS]);
+  assert.deepEqual([...session.seen.userIds], ['u1']);
+  assert.deepEqual(chat.replies, [{ channelId: 'c1', rootId: 'r1', message: 'Sunny, and the bins go out.' }]);
+  await threads.close();
+});
+
+test('a reply in a scheduled thread continues it, and its author counts towards its tools', async () => {
+  const { chat, sessions, threads } = setup();
+  await threads.runScheduled('c1', 'r1', BRIEF);
+  threads.handle(incoming('r1', chat.add('r1', 'u2', 'and tomorrow?'), { rootId: 'r1' }));
+  await threads.idle();
+
+  const session = sessions.get('r1')!;
+  assert.match(session.prompts[1]!, /^@guest .*: and tomorrow\?$/);
+  assert.deepEqual(session.allowed, [true, false]);
+  assert.equal(chat.replies.length, 2);
+  await threads.close();
+});
+
+test("a scheduled run gets no tools when its owner isn't on the allowlist", async () => {
+  const { sessions, threads } = setup();
+  await threads.runScheduled('c1', 'r1', { ...BRIEF, owner: { id: 'u2', name: 'guest' } });
+  assert.deepEqual(sessions.get('r1')!.tools, [[]]);
+  await threads.close();
+});
+
+test("a scheduled run waits for the thread's run in progress, and resolves once it has run", async () => {
+  let release!: () => void;
+  const first = new Promise<void>((resolve) => (release = resolve));
+  const { chat, sessions, threads } = setup({ answer: async (prompt) => {
+    if (prompt.includes('first')) await first;
+    return 'ok';
+  } });
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'first'), { id: 'r1', direct: true }));
+  await new Promise((resolve) => setImmediate(resolve));
+  let ran = false;
+  const scheduled = threads.runScheduled('c1', 'r1', BRIEF).then(() => (ran = true));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ran, false);
+  release();
+  await scheduled;
+
+  const { prompts } = sessions.get('r1')!;
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1]!, /scheduled "morning-brief"\): What is on today\?$/);
+  await threads.close();
+});
+
+test('a scheduled run is dropped, and resolves, once threads are closing', async (t) => {
+  t.mock.method(console, 'warn', () => {});
+  let release!: () => void;
+  const first = new Promise<void>((resolve) => (release = resolve));
+  const { chat, sessions, threads } = setup({ answer: async () => {
+    await first;
+    return 'ok';
+  } });
+  threads.handle(incoming('r1', chat.add('r1', 'u1', 'first'), { id: 'r1', direct: true }));
+  await new Promise((resolve) => setImmediate(resolve));
+  // Waiting behind the run in progress as the thread closes.
+  const waiting = threads.runScheduled('c1', 'r1', BRIEF);
+  const closed = threads.close();
+  release();
+  await closed;
+  await waiting;
+  assert.equal(sessions.get('r1')!.prompts.length, 1);
+
+  await threads.runScheduled('c1', 'r2', BRIEF);
+  assert.equal(sessions.has('r2'), false);
+});
