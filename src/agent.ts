@@ -9,11 +9,11 @@ export interface Agent {
   /** Whether the thread has a session from an earlier run. */
   hasSession(rootId: string): boolean;
   /**
-   * Parses `ref`, written `provider/model[:thinking]`, as a model to run a thread on. Returns
-   * undefined when pi knows no such provider, so `ref` is ordinary text rather than a model. Throws
-   * when the provider is known but lacks the model or an API key; the message is meant for the thread.
+   * The model `ref`, written `provider/model[:thinking]`, names to run a thread on. Throws when it
+   * isn't written so, or names a provider or model pi doesn't have, or one without an API key. The
+   * message is meant for the thread, with what was written in it as inline code.
    */
-  pickModel(ref: string): ModelChoice | undefined;
+  pickModel(ref: string): ModelChoice;
   /**
    * Opens the thread's session, creating it on first use. A new session runs on `model`, MODEL's by
    * default; an existing one on the model it was created with. With the scheduler on, `onScheduled`

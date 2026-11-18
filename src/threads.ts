@@ -12,7 +12,7 @@ export interface ThreadsOptions {
   allowedUsers: AllowedUsers | undefined;
   /** Idle sessions are closed after this long, and reopened from their file on the next post. */
   idleMs: number;
-  /** Whether the post that starts a thread may pick its model, with a trailing `/provider/model[:thinking]`. */
+  /** Whether the post that starts a thread may pick its model, with a trailing `/model provider/model[:thinking]`. */
   pickModel: boolean;
 }
 
@@ -215,17 +215,16 @@ class Thread {
   }
 
   /**
-   * The model the first post picks, with a trailing `/provider/model[:thinking]`, and `posts` with
-   * that word taken off it. A word naming no provider pi knows is left as it is. Throws for a model
-   * that can't run.
+   * The model the first post picks, with a trailing `/model provider/model[:thinking]`, and `posts`
+   * with that taken off it. Throws for a model that can't run.
    */
   #pickModel(posts: ThreadPost[]): { model?: ModelChoice; posts: ThreadPost[] } {
     const { agent, options } = this.#context;
     if (!options.pickModel) return { posts };
     const i = posts.findIndex((p) => p.id === this.#firstPostId);
     const picked = i >= 0 ? trailingModel(posts[i]!.message) : undefined;
-    const model = picked && agent.pickModel(picked.ref);
-    if (!model) return { posts };
+    if (!picked) return { posts };
+    const model = agent.pickModel(picked.ref);
     console.log(`Thread ${this.#rootId}: runs on ${model.provider}/${model.model} (thinking ${model.thinkingLevel})`);
     return { model, posts: posts.with(i, { ...posts[i]!, message: picked.message }) };
   }
