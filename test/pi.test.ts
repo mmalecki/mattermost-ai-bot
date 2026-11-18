@@ -77,9 +77,12 @@ async function localAgent({
 test('picks models pi has, and says why it refuses others', async () => {
   const { agent } = await localAgent();
   assert.deepEqual(agent.pickModel('local/large:high'), { provider: 'local', model: 'large', thinkingLevel: 'high' });
-  assert.throws(() => agent.pickModel('large'), /^Error: a model is written as provider\/model\[:thinking\], not "large"$/);
-  assert.throws(() => agent.pickModel('remote/large'), /^Error: there is no provider remote$/);
-  assert.throws(() => agent.pickModel('local/huge'), /^Error: there is no model local\/huge$/);
+  assert.throws(() => agent.pickModel('large'), /^Error: a model is written as provider\/model\[:thinking\], not `large`$/);
+  assert.throws(() => agent.pickModel('remote/large'), /^Error: there is no provider `remote`$/);
+  assert.throws(() => agent.pickModel('local/huge'), /^Error: there is no model `local\/huge`$/);
+  // Quoted as code, so a mention in it notifies no one, and no backtick in it ends the code early.
+  assert.throws(() => agent.pickModel('@all/x'), /^Error: there is no provider `@all`$/);
+  assert.throws(() => agent.pickModel('a`@channel/x'), /^Error: there is no provider `a@channel`$/);
 });
 
 test('a session runs on the model it was created with, MODEL by default', async (t) => {

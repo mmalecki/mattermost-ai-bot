@@ -135,13 +135,13 @@ export async function createAgent(config: Config, botUsername: string): Promise<
       try {
         choice = parseModel(ref);
       } catch {
-        throw new Error(`a model is written as provider/model[:thinking], not "${ref}"`);
+        throw new Error(`a model is written as provider/model[:thinking], not ${code(ref)}`);
       }
       const { provider, model: id } = choice;
       // Said in the thread, so without the paths and variables of findModel's errors.
-      if (!modelRuntime.getProvider(provider)) throw new Error(`there is no provider ${provider}`);
-      if (!modelRuntime.getModel(provider, id)) throw new Error(`there is no model ${provider}/${id}`);
-      if (!modelRuntime.getProviderAuthStatus(provider).configured) throw new Error(`there is no API key for ${provider}`);
+      if (!modelRuntime.getProvider(provider)) throw new Error(`there is no provider ${code(provider)}`);
+      if (!modelRuntime.getModel(provider, id)) throw new Error(`there is no model ${code(`${provider}/${id}`)}`);
+      if (!modelRuntime.getProviderAuthStatus(provider).configured) throw new Error(`there is no API key for ${code(provider)}`);
       return choice;
     },
 
@@ -273,4 +273,12 @@ function seenPosts(entries: SessionEntry[]): Seen {
     for (const id of seen.userIds) userIds.add(id);
   }
   return { createAt, userIds };
+}
+
+/**
+ * `text` as inline code, for a reply to quote what a post wrote: Mattermost shows it as written, and
+ * notifies no one of a mention in it. Backticks are left out, as they would end it.
+ */
+function code(text: string): string {
+  return `\`${text.replaceAll('`', '')}\``;
 }

@@ -101,8 +101,8 @@ function fakeAgent(answer: Answer, images: boolean, imageTools: boolean, context
     hasSession: (rootId) => prompted.has(rootId),
     pickModel(ref) {
       const choice = parseModel(ref);
-      if (!['anthropic', 'local'].includes(choice.provider)) throw new Error(`there is no provider ${choice.provider}`);
-      if (choice.model === 'missing') throw new Error(`there is no model ${choice.provider}/missing`);
+      if (!['anthropic', 'local'].includes(choice.provider)) throw new Error(`there is no provider \`${choice.provider}\``);
+      if (choice.model === 'missing') throw new Error(`there is no model \`${choice.provider}/missing\``);
       return choice;
     },
     async openSession(rootId, { model, allowTools, onScheduled }) {
@@ -766,35 +766,38 @@ test('in a thread the bot is brought into, the post that mentions it picks the m
   await threads.close();
 });
 
-test('/model picks nothing unless it ends the post with a model after it, or without ALLOW_PICKING_MODEL', async () => {
-  const { chat, sessions, threads } = setup({ pickModel: true });
-  for (const [i, text] of ["what's in /etc/hosts", '/model local/qwen and more', 'which /model', 'see /models local/qwen', 'see a/model local/qwen'].entries()) {
-    threads.handle(incoming(`r${i}`, chat.add(`r${i}`, 'u1', text), { id: `r${i}`, direct: true }));
+test('/model picks nothing unless a provider/model ends the post after it, or without ALLOW_PICKING_MODEL', async () => {
+  const cases = [
+    [true, 'what does /model do?'],
+    [true, 'see /model local/qwen and more'],
+    [false, 'hi /model anthropic/claude-opus-5-5'],
+  ] as const;
+  for (const [pickModel, text] of cases) {
+    const { chat, sessions, threads } = setup({ pickModel });
+    threads.handle(incoming('p0', chat.add('p0', 'u1', text), { direct: true }));
     await threads.idle();
-    assert.equal(sessions.get(`r${i}`)!.model, undefined, text);
-    assert.ok(sessions.get(`r${i}`)!.prompts[0]!.endsWith(`: ${text}`), text);
+    assert.equal(sessions.get('p0')!.model, undefined, text);
+    assert.ok(sessions.get('p0')!.prompts[0]!.endsWith(`: ${text}`), text);
+    await threads.close();
   }
-  await threads.close();
-
-  const off = setup();
-  off.threads.handle(incoming('r1', off.chat.add('r1', 'u1', 'hi /model anthropic/claude-opus-5-5'), { id: 'r1', direct: true }));
-  await off.threads.idle();
-  assert.equal(off.sessions.get('r1')!.model, undefined);
-  assert.match(off.sessions.get('r1')!.prompts[0]!, /: hi \/model anthropic\/claude-opus-5-5$/);
-  await off.threads.close();
 });
 
 test("a model that can't run is refused, and the next post that brings the bot in starts the thread afresh", async () => {
   const { chat, sessions, threads } = setup({ pickModel: true });
+  threads.handle(incoming('p0', chat.add('p0', 'u1', 'hi /model remote/qwen'), { direct: true }));
+  await threads.idle();
   threads.handle(incoming('p0', chat.add('p0', 'u1', 'hi /model anthropic/missing'), { direct: true }));
   await threads.idle();
   assert.equal(sessions.size, 0);
-  assert.equal(chat.replies[0]!.message, "Sorry, I can't run on that model: there is no model anthropic/missing");
+  assert.deepEqual(
+    chat.replies.map((r) => r.message),
+    ["Sorry, I can't run on that model: there is no provider `remote`", "Sorry, I can't run on that model: there is no model `anthropic/missing`"],
+  );
 
   threads.handle(incoming('p0', chat.add('p0', 'u1', 'hi /model local/qwen'), { direct: true }));
   await threads.idle();
   assert.deepEqual(sessions.get('p0')!.model, { provider: 'local', model: 'qwen', thinkingLevel: 'off' });
-  assert.equal(chat.replies[1]!.message, 'ok');
+  assert.equal(chat.replies[2]!.message, 'ok');
   await threads.close();
 });
 

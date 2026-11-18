@@ -10,7 +10,8 @@ export interface Agent {
   hasSession(rootId: string): boolean;
   /**
    * The model `ref`, written `provider/model[:thinking]`, names to run a thread on. Throws when it
-   * names none pi has, or one without an API key; the message is meant for the thread.
+   * isn't written so, or names a provider or model pi doesn't have, or one without an API key. The
+   * message is meant for the thread, with what was written in it as inline code.
    */
   pickModel(ref: string): ModelChoice;
   /**

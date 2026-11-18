@@ -41,11 +41,12 @@ export function formatJob(job: ScheduledJob, now: number): string {
 }
 
 /**
- * `message` without a trailing `/model <ref>`, and the ref. Whether it names a model is the agent's
- * to say.
+ * `message` without a trailing `/model provider/model[:thinking]` on its last line, and the ref. Only
+ * a ref written so is one, so `what does /model do?` is no pick. Whether it names a model is the
+ * agent's to say.
  */
 export function trailingModel(message: string): { message: string; ref: string } | undefined {
-  const match = /(?:^|\s)\/model\s+(\S+)\s*$/.exec(message);
+  const match = /(?:^|\s)\/model[ \t]+([^\s/]\S*\/\S+)\s*$/.exec(message);
   if (!match) return undefined;
   return { message: message.slice(0, match.index).trimEnd(), ref: match[1]! };
 }
