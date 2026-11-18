@@ -42,6 +42,20 @@ export interface Chat {
   typing(channelId: string, rootId: string): void;
 }
 
+/** What user-scheduled jobs need of the chat server: finding where they post, and starting threads there. */
+export interface ScheduleChat {
+  /** The id of the user named `username`. */
+  userId(username: string): Promise<string>;
+  /** The id of the bot's direct channel with the user `userId`, made if there is none yet. */
+  directChannel(userId: string): Promise<string>;
+  /** The id of the channel `channel` in the team `team`, both by the names in their URLs. */
+  channelId(team: string, channel: string): Promise<string>;
+  /** The thread the post `postId` is in: its channel, and its root post. */
+  thread(postId: string): Promise<{ channelId: string; rootId: string }>;
+  /** Posts `message` as the root of a new thread, and gives its id. */
+  post(channelId: string, message: string): Promise<string>;
+}
+
 export interface IncomingPost {
   id: string;
   rootId: string;

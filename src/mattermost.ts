@@ -3,7 +3,7 @@ import type { FileInfo } from '@mattermost/types/files';
 import type { Post } from '@mattermost/types/posts';
 import { errorMessage } from './error.ts';
 import { splitMessage } from './split.ts';
-import type { Chat, IncomingPost, OutgoingFile, PostFile, ThreadPost } from './chat.ts';
+import type { Chat, IncomingPost, OutgoingFile, PostFile, ScheduleChat, ThreadPost } from './chat.ts';
 
 /** Mattermost's default MaxPostSize is 16383 characters; leave room for continuation. */
 const MAX_POST_CHARS = 16_000;
@@ -17,7 +17,19 @@ const CATCH_UP_MAX_MS = 24 * 3_600_000;
 /** What the bot uses of Mattermost's REST client. */
 export type Client = Pick<
   Client4,
-  'getMe' | 'getMyTeams' | 'getMyChannels' | 'getPostsSince' | 'getPaginatedPostThread' | 'getUser' | 'getFileRoute' | 'uploadFile' | 'createPost'
+  | 'getMe'
+  | 'getMyTeams'
+  | 'getMyChannels'
+  | 'getPostsSince'
+  | 'getPaginatedPostThread'
+  | 'getPost'
+  | 'getUser'
+  | 'getUserByUsername'
+  | 'createDirectChannel'
+  | 'getChannelByNameAndTeamName'
+  | 'getFileRoute'
+  | 'uploadFile'
+  | 'createPost'
 >;
 
 /** What the bot uses of Mattermost's WebSocket client. */
@@ -26,7 +38,7 @@ export type Socket = Pick<
   'addMessageListener' | 'addMissedMessageListener' | 'addFirstConnectListener' | 'addReconnectListener' | 'addCloseListener' | 'initialize' | 'close' | 'userTyping'
 >;
 
-export class Mattermost implements Chat {
+export class Mattermost implements Chat, ScheduleChat {
   readonly botUserId: string;
   readonly botUsername: string;
   readonly #client: Client;
@@ -189,6 +201,28 @@ export class Mattermost implements Chat {
 
   typing(channelId: string, rootId: string): void {
     this.#ws.userTyping(channelId, rootId);
+  }
+
+  async userId(username: string): Promise<string> {
+    return (await this.#client.getUserByUsername(username)).id;
+  }
+
+  async directChannel(userId: string): Promise<string> {
+    // The server gives the channel there is, if any.
+    return (await this.#client.createDirectChannel([this.botUserId, userId])).id;
+  }
+
+  async channelId(team: string, channel: string): Promise<string> {
+    return (await this.#client.getChannelByNameAndTeamName(team, channel)).id;
+  }
+
+  async thread(postId: string): Promise<{ channelId: string; rootId: string }> {
+    const post = await this.#client.getPost(postId);
+    return { channelId: post.channel_id, rootId: post.root_id || post.id };
+  }
+
+  async post(channelId: string, message: string): Promise<string> {
+    return (await this.#client.createPost({ channel_id: channelId, message })).id;
   }
 }
 

@@ -105,7 +105,25 @@ function fakeServer() {
       if (file.name.startsWith('bad')) throw new Error('too large');
       return { file_infos: [{ id: `f-${file.name}` }] };
     },
-    createPost: async (p: unknown) => void created.push(p),
+    async createPost(p: unknown) {
+      created.push(p);
+      return { id: `new${created.length}` };
+    },
+    async getUserByUsername(username: string) {
+      const id = [...users].find(([, name]) => name === username)?.[0];
+      if (!id) throw new Error(`no user ${username}`);
+      return { id, username };
+    },
+    createDirectChannel: async (userIds: string[]) => ({ id: `dm-${userIds.join('-')}` }),
+    async getChannelByNameAndTeamName(team: string, channel: string) {
+      if (team !== 'home' || channel !== 'town-square') throw new Error(`no channel ${team}/${channel}`);
+      return { id: 'town' };
+    },
+    async getPost(postId: string) {
+      const found = posts.find((p) => p.id === postId);
+      if (!found) throw new Error(`no post ${postId}`);
+      return found;
+    },
   };
   const listeners: Record<string, (arg?: unknown) => void> = {};
   let initialized: unknown;
@@ -241,4 +259,20 @@ test("downloads a file, or its preview, with the bot's token", async (t) => {
   assert.deepEqual(await mattermost.file('f1', true), new Uint8Array([1, 2]));
   assert.deepEqual(requests, [['http://mm.local/api/v4/files/f1/preview', { Authorization: 'Bearer tok' }]]);
   await assert.rejects(mattermost.file('missing', false), /files\/missing: 404 Not Found/);
+});
+
+test('finds where scheduled jobs post, and starts their threads', async (t) => {
+  const { mattermost, server } = await listening(t);
+  assert.equal(await mattermost.userId('maciej'), 'u1');
+  await assert.rejects(mattermost.userId('nobody'), /no user nobody/);
+  assert.equal(await mattermost.directChannel('u1'), 'dm-bot-u1');
+  assert.equal(await mattermost.channelId('home', 'town-square'), 'town');
+
+  server.posts.push(post({ id: 'r1', channel_id: 'town', create_at: 1 }), post({ id: 'p2', channel_id: 'town', root_id: 'r1', create_at: 2 }));
+  assert.deepEqual(await mattermost.thread('r1'), { channelId: 'town', rootId: 'r1' });
+  // A reply stands for its thread.
+  assert.deepEqual(await mattermost.thread('p2'), { channelId: 'town', rootId: 'r1' });
+
+  assert.equal(await mattermost.post('town', '**Morning brief** for @maciej'), 'new1');
+  assert.deepEqual(server.created, [{ channel_id: 'town', message: '**Morning brief** for @maciej' }]);
 });
