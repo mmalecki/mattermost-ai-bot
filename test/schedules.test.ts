@@ -21,8 +21,11 @@ function tempDir(): string {
 class FakeChat implements ScheduleChat {
   users: Record<string, string> = { alice: 'u1', bob: 'u2' };
   posted: { channelId: string; message: string }[] = [];
+  /** Looking users up waits for this, when set. */
+  lookup: Promise<void> | undefined;
 
   async userId(username: string) {
+    await this.lookup;
     const id = this.users[username];
     if (!id) throw new Error(`no user ${username}`);
     return id;
@@ -164,7 +167,7 @@ test('a run missed while the bot was down goes at start only within catchUp, and
   assert.equal(warnings.mock.callCount(), 0);
 });
 
-test('a run missed while the bot was down is skipped without catchUp, and nothing is missed on the first start', async (t) => {
+test('a run missed while the bot was down is skipped without catchUp, and a new job has missed none', async (t) => {
   const statePath = join(tempDir(), 'schedules-state.json');
   writeFileSync(statePath, JSON.stringify({ brief: { lastDue: '2026-10-22T05:00:00.000Z' } }));
   const now = Date.parse('2026-10-23T05:10:00Z');
@@ -174,8 +177,22 @@ test('a run missed while the bot was down is skipped without catchUp, and nothin
   await settle();
   assert.equal(runs.length, 0);
   assert.match(String(warnings.mock.calls[0]!.arguments[0]), /Schedule "brief": skipping the run due 2026-10-2\d \d\d:00 \S+, which is 10 minutes late/);
-  // Recorded, so the next start doesn't look at it again.
-  assert.deepEqual(lastDue(statePath), { brief: { lastDue: '2026-10-23T05:00:00.000Z' } });
+  // Recorded, so the next start doesn't look at it again, as is when the new job was added.
+  assert.deepEqual(lastDue(statePath), { brief: { lastDue: '2026-10-23T05:00:00.000Z' }, new: { lastDue: '2026-10-23T05:10:00.000Z' } });
+  schedules.stop();
+});
+
+test('a new job catches up on a run it missed after it was added', async (t) => {
+  const { runs, make } = setup(t, [brief({ catchUpMs: 30 * 60_000 })]);
+  make().start();
+  // The bot goes down at 6:30, and comes back at 7:10.
+  t.mock.timers.tick(30 * 60_000);
+  const schedules = make();
+  t.mock.timers.reset();
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: FRIDAY_6 + 70 * 60_000 });
+  schedules.start();
+  await settle();
+  assert.equal(runs.length, 1);
   schedules.stop();
 });
 
@@ -245,5 +262,19 @@ test('stopping disarms every job', async (t) => {
   schedules.start();
   schedules.stop();
   await tick(t, 24 * HOUR);
+  assert.equal(runs.length, 0);
+});
+
+test('a run that comes due as the bot shuts down posts nothing', async (t) => {
+  const { chat, runs, make } = setup(t, [brief()]);
+  let release!: () => void;
+  chat.lookup = new Promise((resolve) => (release = resolve));
+  const schedules = make();
+  schedules.start();
+  await tick(t, HOUR);
+  schedules.stop();
+  release();
+  await settle();
+  assert.deepEqual(chat.posted, []);
   assert.equal(runs.length, 0);
 });

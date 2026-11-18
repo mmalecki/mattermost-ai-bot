@@ -305,8 +305,8 @@ act as anyone, so keep it with `mcp.json`.
 `schedules.json` is read on start: a job that's malformed, or whose model can't run, stops the bot from starting. A
 `promptFile` is read at every run, so it can change between runs. A run the bot was down for, or is over a minute late
 for, is skipped, unless `catchUp` lets it be that late: then the latest one missed runs, once. When each job last came
-due is kept in `DATA_DIR/schedules-state.json`. A run that comes due while the job's last one is still going is
-skipped.
+due, or was added, is kept in `DATA_DIR/schedules-state.json`. A run that comes due while the job's last one is still
+going is skipped.
 
 #### Picking a model
 With `ALLOW_PICKING_MODEL=true`, the post that brings the bot into a thread can end with `/model` and a model, written

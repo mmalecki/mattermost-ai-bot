@@ -41,7 +41,7 @@ export class Schedules {
   readonly #timers = new Map<string, NodeJS.Timeout>();
   /** The jobs with a run going, by name. */
   readonly #running = new Set<string>();
-  /** When each job last came due, by name. */
+  /** When each job last came due, or was first armed, by name. */
   #lastDue: Record<string, number> = {};
   #stopped = false;
 
@@ -63,11 +63,14 @@ export class Schedules {
   start(): void {
     this.#lastDue = readState(this.#options.statePath);
     const now = Date.now();
+    // A job new to the file has missed nothing so far, and from now on, it can.
+    const added = this.#jobs.filter((job) => this.#lastDue[job.name] === undefined);
+    for (const job of added) this.#lastDue[job.name] = now;
+    if (added.length) this.#save();
     for (const job of this.#jobs) {
-      const last = this.#lastDue[job.name];
-      // The latest time before now, with now included. A job never run before has missed nothing.
-      const missed = last === undefined ? undefined : job.times.previousRuns(1, new Date(now + 1))[0]?.getTime();
-      if (missed !== undefined && missed > last!) this.#due(job, missed);
+      // The latest time before now, with now included.
+      const missed = job.times.previousRuns(1, new Date(now + 1))[0]?.getTime();
+      if (missed !== undefined && missed > this.#lastDue[job.name]!) this.#due(job, missed);
       this.#arm(job);
     }
   }
@@ -107,11 +110,7 @@ export class Schedules {
     // Before it's run, so a run that fails, or a restart during it, doesn't repeat it. A run that's
     // skipped is recorded too, so a restart doesn't look at it again.
     this.#lastDue[job.name] = at;
-    try {
-      writeState(this.#options.statePath, this.#lastDue);
-    } catch (error) {
-      console.error(`Schedule "${job.name}": saving when it came due failed:`, error);
-    }
+    this.#save();
     const late = Date.now() - at;
     if (late > Math.max(LATE_MS, job.catchUpMs)) {
       console.warn(`Schedule "${job.name}": skipping the run due ${formatTime(at)}, which is ${Math.round(late / 60_000)} minutes late`);
@@ -125,6 +124,15 @@ export class Schedules {
     this.#run(job)
       .catch((error: unknown) => console.error(`Schedule "${job.name}": its run due ${formatTime(at)} failed:`, error))
       .finally(() => this.#running.delete(job.name));
+  }
+
+  /** Saves #lastDue. In a timer, where an error would end the bot, so it's only logged. */
+  #save(): void {
+    try {
+      writeState(this.#options.statePath, this.#lastDue);
+    } catch (error) {
+      console.error(`Saving when the schedules came due, to ${this.#options.statePath}, failed:`, error);
+    }
   }
 
   /**
@@ -144,13 +152,18 @@ export class Schedules {
       ({ channelId, rootId } = await chat.thread(target.thread));
     } else {
       channelId = 'user' in target ? await chat.directChannel(target.user === job.owner ? owner.id : await chat.userId(target.user)) : await chat.channelId(target.team, target.channel);
+      // Threads would drop the run, and leave the thread with nothing but this post.
+      if (this.#stopped) {
+        console.warn(`Schedule "${job.name}": shutting down, so its run is dropped`);
+        return;
+      }
       rootId = await chat.post(channelId, `**${job.title}** for @${job.owner}`);
     }
     await threads.runScheduled(channelId, rootId, { name: job.name, owner, prompt, model: job.modelChoice });
   }
 }
 
-/** When each job last came due, by name, from the state file. A file that can't be read is taken for none. */
+/** When each job last came due, or was first armed, by name, from the state file. A file that can't be read is taken for none. */
 function readState(path: string): Record<string, number> {
   if (!existsSync(path)) return {};
   try {

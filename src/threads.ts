@@ -305,7 +305,7 @@ class Thread {
     // The owner is an author from now on, as one who posted would be. A createAt of 0 leaves which
     // posts were seen as it was.
     session.markSeen(0, [run.owner.id]);
-    await this.#allowTools(session.seen(), []);
+    await this.#allowTools(session.seen(), [run.owner.id]);
     console.log(`Thread ${this.#rootId}: scheduled "${run.name}" is due`);
     await this.#answer(session, formatScheduled(run.name, run.owner.name, run.prompt, Date.now()));
   }
