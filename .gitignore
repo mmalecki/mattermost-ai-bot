@@ -4,5 +4,6 @@ data/
 mcp.json
 models.json
 APPEND_SYSTEM.md
+schedules.json
 eval/results/
 dist/

@@ -43,6 +43,7 @@
     "@mattermost/types": "^11.9.0",
     "@mmalecki/feather-pi-web": "^0.3.0",
     "@silvia-odwyer/photon-node": "^0.3.4",
+    "croner": "11.0.0",
     "micromatch": "^4.0.8"
   },
   "overrides": {

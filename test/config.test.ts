@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
-import { loadConfig, loadTools, parseAllowedUsers, parseImageModel, parseModel } from '../src/config.ts';
+import { loadConfig, loadSchedules, loadTools, parseAllowedUsers, parseImageModel, parseModel } from '../src/config.ts';
 
 const base = { MATTERMOST_URL: 'http://mm.local/', MATTERMOST_TOKEN: 'mm', MODEL: 'mistral/mistral-small-2603' };
 
@@ -160,4 +160,87 @@ function write(content: unknown): string {
 test('caps output at 8192 tokens by default', () => {
   assert.equal(loadConfig(base).llm.maxTokens, 8192);
   assert.equal(loadConfig({ ...base, MAX_OUTPUT_TOKENS: '2048' }).llm.maxTokens, 2048);
+});
+
+/** schedules.json, holding `jobs`, next to an mcp.json, with the files in `files`. */
+function writeSchedules(jobs: unknown, files: Record<string, string> = {}): { dir: string; path: string } {
+  const dir = tempDir();
+  writeFileSync(join(dir, 'mcp.json'), '{}');
+  for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
+  const path = join(dir, 'schedules.json');
+  writeFileSync(path, JSON.stringify(jobs));
+  return { dir, path };
+}
+
+test('reads the jobs in schedules.json, next to the MCP config, if there is one', () => {
+  const { dir } = writeSchedules(
+    {
+      'morning-brief': { cron: '0 7 * * 1-5', timezone: 'Europe/Warsaw', to: '@alice', title: 'Morning brief', promptFile: 'brief.md', catchUp: '30m' },
+      digest: { cron: '@daily', to: 'home/town-square', owner: '@bob', prompt: ' Sum up the day. ', model: 'anthropic/claude-haiku-5-5:low' },
+      follow_up: { cron: '*/15 * * * *', thread: 'p1', owner: 'carol', prompt: 'Anything new?', catchUp: '2h' },
+      off: { cron: '0 7 * * *', to: '@alice', prompt: 'Not now', enabled: false },
+    },
+    { 'brief.md': 'What is on today?' },
+  );
+  assert.deepEqual(loadConfig({ ...base, MCP_CONFIG: join(dir, 'mcp.json') }).schedules, [
+    {
+      name: 'morning-brief',
+      cron: '0 7 * * 1-5',
+      timezone: 'Europe/Warsaw',
+      target: { user: 'alice' },
+      owner: 'alice',
+      title: 'Morning brief',
+      prompt: { file: join(dir, 'brief.md') },
+      model: undefined,
+      catchUpMs: 30 * 60_000,
+    },
+    {
+      name: 'digest',
+      cron: '@daily',
+      timezone: undefined,
+      target: { team: 'home', channel: 'town-square' },
+      owner: 'bob',
+      title: 'digest',
+      prompt: { text: 'Sum up the day.' },
+      model: 'anthropic/claude-haiku-5-5:low',
+      catchUpMs: 0,
+    },
+    {
+      name: 'follow_up',
+      cron: '*/15 * * * *',
+      timezone: undefined,
+      target: { thread: 'p1' },
+      owner: 'carol',
+      title: 'follow_up',
+      prompt: { text: 'Anything new?' },
+      model: undefined,
+      catchUpMs: 2 * 3_600_000,
+    },
+  ]);
+  assert.deepEqual(loadConfig(base).schedules, []);
+});
+
+test('rejects malformed jobs in schedules.json, naming them', () => {
+  const job = { cron: '0 7 * * *', to: '@alice', prompt: 'Brief me' };
+  const rejects = (jobs: unknown, message: RegExp) => assert.throws(() => loadSchedules(writeSchedules(jobs).path), message);
+  rejects([], /expected an object with a job under each name/);
+  rejects({ 'morning brief': job }, /"morning brief": a name is letters, digits/);
+  rejects({ brief: 'daily' }, /"brief": expected an object/);
+  rejects({ brief: { ...job, promt: 'x' } }, /"brief": unknown "promt"; a job takes cron, timezone, to/);
+  rejects({ brief: { ...job, cron: undefined } }, /"cron" must give its times/);
+  rejects({ brief: { ...job, cron: '0 0 7 * * *' } }, /"cron" must be five fields, or a nickname/);
+  rejects({ brief: { ...job, cron: '61 7 * * *' } }, /"cron" must be five fields/);
+  rejects({ brief: { ...job, cron: '0 7 30 2 *' } }, /"cron" "0 7 30 2 \*" never comes due/);
+  rejects({ brief: { ...job, timezone: 'Mars/Olympus' } }, /"timezone" must be an IANA time zone, such as "Europe\/Warsaw", not "Mars\/Olympus"/);
+  rejects({ brief: { ...job, to: undefined } }, /give either "to", a "@user" or a "team\/channel"/);
+  rejects({ brief: { ...job, thread: 'p1' } }, /give either "to"/);
+  rejects({ brief: { ...job, to: 'town-square' } }, /"to" must be a "@user" or a "team\/channel"/);
+  rejects({ brief: { ...job, to: 'home/town/square' } }, /"to" must be a "@user" or a "team\/channel"/);
+  rejects({ brief: { ...job, to: 'home/town-square' } }, /"owner" must name the user the job runs as/);
+  rejects({ brief: { ...job, prompt: ' ' } }, /"prompt" must be a non-empty string/);
+  rejects({ brief: { ...job, promptFile: 'brief.md' } }, /give either "prompt", what to ask the agent, or "promptFile"/);
+  rejects({ brief: { ...job, prompt: undefined, promptFile: 'missing.md' } }, /"promptFile" .*missing\.md does not exist/);
+  rejects({ brief: { ...job, model: 'haiku' } }, /"model" must be provider\/model\[:thinking\]/);
+  rejects({ brief: { ...job, catchUp: '1d' } }, /"catchUp" must be minutes or hours, such as "30m" or "2h", not "1d"/);
+  rejects({ brief: { ...job, enabled: 'no' } }, /"enabled" must be true or false/);
 });
